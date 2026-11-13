@@ -124,7 +124,7 @@ class HarnessTests(unittest.TestCase):
         workflow, _ = self.workflow()
         workflow.github.pr.return_value = {'merged': True, 'head': {'sha': 'abc'}, 'merge_commit_sha': 'merge'}
         workflow.github.checks_pass.return_value = True
-        workflow.git = Mock()
+        workflow.git = Mock(side_effect=lambda *args, **kwargs: 'merge' if args[0] == 'rev-parse' else '')
         workflow.codex.review.return_value = {'passed': False, 'gaps': ['manual launch missing']}
         run = workflow.advance(self.run_data('waiting_merge'))
         self.assertEqual(run['stage'], 'acceptance_gap')
@@ -135,7 +135,9 @@ class HarnessTests(unittest.TestCase):
         run = self.run_data('complete')
         run['assessment'] = {'passed': True}
         run['merge_sha'] = 'merge'
-        workflow.github.pr.return_value = {'merged': True, 'merge_commit_sha': 'merge'}
+        run['visual_observation'] = 'Launched visibly'
+        workflow.github.pr.return_value = {'merged': True, 'merge_commit_sha': 'merge', 'head': {'sha': 'abc'}}
+        workflow.github.checks_pass.return_value = True
         workflow.jira.transition.side_effect = [RuntimeError('Jira unavailable'), None]
         with self.assertRaises(RuntimeError):
             workflow.advance(run)
@@ -184,7 +186,7 @@ class HarnessTests(unittest.TestCase):
         run['visual_observation'] = 'Exported game visibly launched'
         workflow.github.pr.return_value = {'merged': True, 'head': {'sha': 'abc'}, 'merge_commit_sha': 'merge'}
         workflow.github.checks_pass.return_value = True
-        workflow.git = Mock()
+        workflow.git = Mock(side_effect=lambda *args, **kwargs: 'merge' if args[0] == 'rev-parse' else '')
         workflow.codex.review.return_value = {'passed': True, 'gaps': []}
         self.assertEqual(workflow.advance(run)['stage'], 'done')
         workflow.advance(store.get('run'))
@@ -197,6 +199,96 @@ class HarnessTests(unittest.TestCase):
         jira.get = Mock(return_value={'transitions': []})
         with self.assertRaisesRegex(RuntimeError, 'No configured Jira transition'):
             jira.transition('KAN-8', 'developing')
+
+    def test_story_cannot_complete_with_open_subtasks(self):
+        jira = object.__new__(Jira)
+        jira.stages = {'done': ['Done']}
+        jira.issue = Mock(return_value={'fields': {'status': {'name': 'Todo'}, 'issuetype': {'hierarchyLevel': 0}}})
+        jira.search = Mock(return_value=[{'fields': {'status': {'statusCategory': {'key': 'new'}}}}])
+        with self.assertRaisesRegex(RuntimeError, 'Child issues'):
+            jira.transition('KAN-8', 'done')
+
+    def test_assessment_reconciles_previously_pending_checks(self):
+        workflow, _ = self.workflow()
+        run = self.run_data('assess')
+        run.update(merge_sha='merge', merge_gap='Checks were pending', visual_observation='Launched visibly')
+        workflow.github.pr.return_value = {'merged': True, 'head': {'sha': 'abc'}, 'merge_commit_sha': 'merge'}
+        workflow.github.checks_pass.return_value = True
+        workflow.git = Mock(side_effect=lambda *args, **kwargs: 'merge' if args[0] == 'rev-parse' else '')
+        workflow.codex.review.return_value = {'passed': True, 'gaps': []}
+        self.assertEqual(workflow.advance(run)['stage'], 'done')
+        self.assertNotIn('merge_gap', run)
+
+    def test_dirty_assessment_is_rejected(self):
+        workflow, _ = self.workflow()
+        run = self.run_data('assess')
+        run['merge_sha'] = 'merge'
+        workflow.github.pr.return_value = {'merged': True, 'head': {'sha': 'abc'}, 'merge_commit_sha': 'merge'}
+        workflow.git = Mock(side_effect=lambda *args, **kwargs: 'dirty' if args[0] == 'status' else '')
+        with self.assertRaisesRegex(RuntimeError, 'must be clean'):
+            workflow.advance(run)
+        workflow.codex.review.assert_not_called()
+
+    def test_edit_during_review_is_rejected(self):
+        workflow, _ = self.workflow()
+        run = self.run_data('review')
+        workflow.github.pr.return_value = {'merged': False, 'state': 'open', 'head': {'sha': 'abc'}}
+        workflow.git = Mock(side_effect=['abc', '', 'changed'])
+        workflow.codex.review.return_value = {'passed': True}
+        with self.assertRaisesRegex(RuntimeError, 'changed during Codex review'):
+            workflow.advance(run)
+        workflow.github.comment.assert_not_called()
+
+    def test_deleted_last_file_is_staged(self):
+        workflow, _ = self.workflow()
+        command(['git', 'init', '--initial-branch=main'], self.root)
+        command(['git', 'config', 'user.name', 'Harness Test'], self.root)
+        command(['git', 'config', 'user.email', 'harness@example.test'], self.root)
+        (self.root / 'game').mkdir()
+        path = self.root / 'game/last.txt'
+        path.write_text('old')
+        command(['git', 'add', 'game'], self.root)
+        command(['git', 'commit', '-m', 'fixture'], self.root)
+        path.unlink()
+        path.parent.rmdir()
+        workflow.commit(self.run_data('qa'))
+        self.assertIn('D\tgame/last.txt', command(['git', 'show', '--format=', '--name-status', 'HEAD'], self.root))
+
+    def test_timeout_kills_descendants_holding_output_pipes(self):
+        import sys
+        import time
+        child = 'import time; time.sleep(20)'
+        parent = f'import subprocess,sys,time; subprocess.Popen([sys.executable,"-c",{child!r}]); time.sleep(20)'
+        started = time.monotonic()
+        with self.assertRaises(subprocess.TimeoutExpired):
+            command([sys.executable, '-c', parent], self.root, timeout=0.3)
+        self.assertLess(time.monotonic() - started, 2)
+
+    def test_invalid_final_report_is_corrected_within_budget(self):
+        prompts = self.root / 'prompts'
+        prompts.mkdir()
+        (prompts / 'qa.md').write_text('qa')
+        bad = {'passed': True, 'summary': 'result', 'evidence': [], 'gaps': ['missing work']}
+        good = {**bad, 'passed': False}
+        responses = [{'message': {'role': 'assistant', 'content': 'finished'}},
+                     {'message': {'role': 'assistant', 'content': json.dumps(bad)}},
+                     {'message': {'role': 'assistant', 'content': json.dumps(good)}}]
+        with patch('harness.core.request', side_effect=responses) as req:
+            value = Ollama(self.cfg, prompts).run('qa', {}, Tools(self.root, 'qa', self.cfg, lambda _: None))
+        self.assertFalse(value['passed'])
+        self.assertEqual(req.call_count, 3)
+
+    def test_github_checks_require_present_successful_evidence(self):
+        github = object.__new__(GitHub)
+        github.url, github.headers = 'https://example', {}
+        for runs, state, expected in [([], {'statuses': []}, False),
+            ([{'status': 'completed', 'conclusion': 'failure'}], {'statuses': []}, False),
+            ([{'status': 'in_progress', 'conclusion': None}], {'statuses': []}, False),
+            ([{'status': 'completed', 'conclusion': 'success'}], {'statuses': []}, True),
+            ([], {'statuses': [{}], 'state': 'failure'}, False)]:
+            github.get = Mock(return_value=state)
+            with patch('harness.integrations.pages', return_value=runs):
+                self.assertEqual(github.checks_pass('sha'), expected)
 
 
 if __name__ == '__main__':

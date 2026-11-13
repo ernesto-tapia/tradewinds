@@ -6,6 +6,7 @@ jira:
   jql: 'labels = "caribbean-tradewinds" ORDER BY key ASC'
   stages:
     developing: ["En curso", "In Progress"]
+    reviewing: ["En revisión", "In Review"]
     done: ["Finalizada", "Listo", "Done", "Hecho"]
 ollama:
   url: http://localhost:11434
@@ -15,12 +16,14 @@ ollama:
 limits:
   repairs: 3
   turns: 30
+  report_attempts: 2
   command_seconds: 180
   model_seconds: 300
   poll_seconds: 60
 codex: codex
 godot: godot
 godot_version: "4.5.1"
+export_artifact: build/CaribbeanTradewinds.exe
 permissions:
   developer: ["game/", "docs/game/", "tests/game/"]
   qa: ["tests/game/"]

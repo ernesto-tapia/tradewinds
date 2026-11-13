@@ -53,3 +53,7 @@ Post-merge completion requires a matching reviewed head, successful GitHub check
 ## Validation
 
 Run `python -m unittest discover -s tests -v`. Integration tests use fixtures and make no network calls. For a live run, `doctor` must pass first. Game setup and export instructions belong in `docs/game/README.md`, created by KAN-8.
+
+`python scripts/smoke_agents.py` optionally tests the real Ollama developer and QA tool loops with a temporary text-file task, without Jira/GitHub writes. Logs go to `.runs/model-smoke.jsonl`.
+
+Codex receives the exact commit diff and committed game-source snapshot, so it can review even when local file-reading tools are unavailable. Truncated or binary context is listed as omitted. Process deadlines terminate child processes using Windows Job Objects. A rebased PR head preserves the old local head under `refs/tradewinds/backups/` before synchronizing the clean worktree; publication never force-pushes.

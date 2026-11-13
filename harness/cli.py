@@ -56,6 +56,15 @@ def doctor(root, cfg):
                 raise RuntimeError(f'Command executable missing: {executable}')
         return sorted(cfg['commands'])
     check('configured_commands', commands)
+    def limits():
+        for name in ('turns', 'report_attempts', 'command_seconds', 'model_seconds', 'poll_seconds'):
+            value = cfg['limits'].get(name, 2 if name == 'report_attempts' else None)
+            if type(value) is not int or value <= 0:
+                raise ValueError(f'limits.{name} must be a positive integer')
+        if type(cfg['limits']['repairs']) is not int or cfg['limits']['repairs'] < 0:
+            raise ValueError('limits.repairs must be a nonnegative integer')
+        return cfg['limits']
+    check('limits', limits)
     print(json.dumps(checks, indent=2))
     return 0 if all(c['ok'] for c in checks.values()) else 1
 
@@ -100,6 +109,8 @@ def main():
                 run = workflow.start(args.issue)
             elif args.command == 'resume':
                 run = store.get(args.run_id)
+                if run['stage'] == 'acceptance_gap':
+                    run['stage'] = 'assess'
                 if args.visual_observation:
                     run['visual_observation'] = args.visual_observation
                     if run['stage'] == 'acceptance_gap':

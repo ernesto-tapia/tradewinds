@@ -11,6 +11,70 @@ import urllib.request
 import urllib.error
 
 
+class WindowsJob:
+    """Close the job to terminate every descendant, including inherited pipes."""
+    def __init__(self, process):
+        import ctypes
+        from ctypes import wintypes
+        class Basic(ctypes.Structure):
+            _fields_ = [('process_time', ctypes.c_int64), ('job_time', ctypes.c_int64),
+                        ('flags', wintypes.DWORD), ('min_ws', ctypes.c_size_t), ('max_ws', ctypes.c_size_t),
+                        ('process_limit', wintypes.DWORD), ('affinity', ctypes.c_size_t),
+                        ('priority', wintypes.DWORD), ('scheduling', wintypes.DWORD)]
+        class Extended(ctypes.Structure):
+            _fields_ = [('basic', Basic), ('io', ctypes.c_uint64 * 6),
+                        ('process_memory', ctypes.c_size_t), ('job_memory', ctypes.c_size_t),
+                        ('peak_process_memory', ctypes.c_size_t), ('peak_job_memory', ctypes.c_size_t)]
+        self.kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+        self.kernel.CreateJobObjectW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
+        self.kernel.CreateJobObjectW.restype = wintypes.HANDLE
+        self.kernel.SetInformationJobObject.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
+        self.kernel.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+        self.kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+        self.handle = self.kernel.CreateJobObjectW(None, None)
+        info = Extended()
+        info.basic.flags = 0x2000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        if not self.handle or not self.kernel.SetInformationJobObject(self.handle, 9, ctypes.byref(info), ctypes.sizeof(info)) or not self.kernel.AssignProcessToJobObject(self.handle, int(process._handle)):
+            error = ctypes.get_last_error()
+            self.close()
+            process.kill()
+            raise OSError(error, 'Cannot establish Windows process-tree boundary')
+
+    def close(self):
+        if self.handle:
+            self.kernel.CloseHandle(self.handle)
+            self.handle = None
+
+
+def run_process(args, cwd, timeout, env=None, input=None):
+    process = subprocess.Popen(args, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                               stdin=subprocess.PIPE if input is not None else subprocess.DEVNULL,
+                               text=True, encoding='utf-8', errors='replace',
+                               env=clean_env() if env is None else env,
+                               start_new_session=os.name != 'nt')
+    job = WindowsJob(process) if os.name == 'nt' else None
+    try:
+        stdout, stderr = process.communicate(input=input, timeout=timeout)
+        return subprocess.CompletedProcess(args, process.returncode, stdout, stderr)
+    except (subprocess.TimeoutExpired, KeyboardInterrupt):
+        if job:
+            job.close()
+        else:
+            import signal
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        try:
+            process.communicate(timeout=3)
+        except subprocess.TimeoutExpired:
+            pass
+        raise
+    finally:
+        if job:
+            job.close()
+
+
 def request(url, data=None, headers=None, method=None, timeout=60):
     raw = None if data is None else json.dumps(data).encode()
     req = urllib.request.Request(url, raw, {"Content-Type": "application/json", **(headers or {})}, method=method)
@@ -28,9 +92,7 @@ def clean_env():
 
 
 def command(args, cwd, timeout=180, env=None):
-    result = subprocess.run(args, cwd=cwd, capture_output=True, text=True,
-                            encoding="utf-8", errors="replace", timeout=timeout,
-                            env=clean_env() if env is None else env)
+    result = run_process(args, cwd, timeout, env)
     if result.returncode:
         raise RuntimeError(f"Command failed ({result.returncode}): {args[0]}\n{result.stdout[-8000:]}\n{result.stderr[-8000:]}")
     return result.stdout + result.stderr
@@ -129,6 +191,15 @@ class Tools:
                              self.config["limits"]["command_seconds"])
             if any(x in result for x in ("SCRIPT ERROR:", "Parse Error:", "ERROR:")):
                 raise RuntimeError(result[-10000:])
+            if key == 'export' and self.config.get('export_artifact'):
+                artifact = self.path(self.config['export_artifact'])
+                if not artifact.is_file():
+                    raise RuntimeError('Exported executable is missing')
+                smoke = command([str(artifact), '--headless', '--quit-after', '120'], artifact.parent,
+                                self.config['limits']['command_seconds'])
+                if 'ERROR:' in smoke:
+                    raise RuntimeError(smoke[-10000:])
+                result += '\nExported executable smoke test:\n' + smoke
             self.checks[key] = True
             self.log({"check": key, "output": result})
             return result[-10000:] or "exit 0"
@@ -169,15 +240,25 @@ class Ollama:
                     result = tools.call(function["name"], function["arguments"])
                 except (KeyError, ValueError, OSError, RuntimeError, subprocess.TimeoutExpired) as error:
                     result = {"error": str(error)}
+                tools.log({'tool': function['name'], 'result': result})
                 messages.append({"role": "tool", "tool_name": function["name"], "content": json.dumps(result)})
         else:
             raise RuntimeError("Agent tool-turn budget exhausted")
-        messages.append({"role": "user", "content": "Return the final factual report using the required JSON schema."})
-        result = request(cfg["ollama"]["url"] + "/api/chat", {
-            "model": cfg["ollama"][role], "messages": messages, "stream": False, "format": REPORT_SCHEMA,
-            "options": {"temperature": 0, "num_ctx": cfg["ollama"]["context"]}},
-            timeout=cfg["limits"]["model_seconds"])
-        value = report(json.loads(result["message"]["content"]))
+        messages.append({"role": "user", "content": "Return the final factual report using the required JSON schema. Gaps are unmet requirements only. If passed=true, gaps must be the empty array []."})
+        for attempt in range(cfg['limits'].get('report_attempts', 2)):
+            result = request(cfg["ollama"]["url"] + "/api/chat", {
+                "model": cfg["ollama"][role], "messages": messages, "stream": False, "format": REPORT_SCHEMA,
+                "options": {"temperature": 0, "num_ctx": cfg["ollama"]["context"]}},
+                timeout=cfg["limits"]["model_seconds"])
+            tools.log({'role': role, 'raw_report': result['message']['content'], 'attempt': attempt + 1})
+            try:
+                value = report(json.loads(result["message"]["content"]))
+                break
+            except (ValueError, TypeError) as error:
+                if attempt + 1 >= cfg['limits'].get('report_attempts', 2):
+                    raise
+                messages.append(result['message'])
+                messages.append({'role': 'user', 'content': f'Invalid report: {error}. Correct the report while preserving the factual outcome. Use passed=false if unmet requirements remain.'})
         if role == "qa" and value["passed"] and set(tools.checks) != set(cfg["commands"]):
             value = {"passed": False, "summary": "QA did not execute all required checks after its final edit",
                      "evidence": value["evidence"], "gaps": ["Run every configured check successfully"]}

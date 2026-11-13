@@ -4,7 +4,7 @@ import os
 from pathlib import Path
 from urllib.parse import urlencode
 
-from .core import REPORT_SCHEMA, command, report, request
+from .core import REPORT_SCHEMA, command, report, request, run_process
 
 
 def pages(url, headers, key=None):
@@ -93,10 +93,10 @@ class Jira:
 
     def transition(self, key, stage):
         issue = self.issue(key)
-        if stage == 'done' and issue['fields']['issuetype'].get('hierarchyLevel', 0) > 0:
+        if stage == 'done':
             children = self.search(f'parent = "{key}"')
-            if not children or any(c['fields']['status']['statusCategory']['key'] != 'done' for c in children):
-                raise RuntimeError('Epic children are not all complete')
+            if (not children and issue['fields']['issuetype'].get('hierarchyLevel', 0) > 0) or any(c['fields']['status']['statusCategory']['key'] != 'done' for c in children):
+                raise RuntimeError('Child issues are not all complete')
         desired = self.stages[stage]
         if issue['fields']['status']['name'] in desired or (
                 stage == 'done' and issue['fields']['status']['statusCategory']['key'] == 'done'):
@@ -134,18 +134,38 @@ class Codex:
             output.unlink()
         diff = command(['git', 'diff', 'origin/' + self.config['github']['base'] + '...HEAD'] if mode == 'review' else
                        ['git', 'diff', sha + '^1', sha], worktree)
+        feature_diff = None
+        if mode == 'assessment' and evidence.get('base_sha') and evidence.get('feature_sha'):
+            feature_diff = command(['git', 'diff', evidence['base_sha'] + '...' + evidence['feature_sha']], worktree)
+        sources, omitted, remaining = {}, [], 160000
+        tracked = command(['git', 'ls-tree', '-r', '--name-only', sha], worktree).splitlines()
+        for name in tracked:
+            if not name.startswith(('game/', 'tests/game/', 'docs/game/')):
+                continue
+            if Path(name).suffix not in ('.gd', '.godot', '.tscn', '.cfg', '.md', '.json', '.txt', '.tres'):
+                omitted.append(name)
+                continue
+            try:
+                content = command(['git', 'show', sha + ':' + name], worktree)
+                if len(content) > min(remaining, 40000):
+                    omitted.append(name)
+                    continue
+                sources[name] = content
+                remaining -= len(content)
+            except (UnicodeError, OSError):
+                omitted.append(name)
         prompt = (self.prompts / 'reviewer.md').read_text() + '\n' + json.dumps({
             'mode': mode, 'task': task, 'commit': sha, 'evidence': evidence,
             'diff': diff,
-            'instruction': 'Inspect git diff origin/main...HEAD for PR review. For merged assessment inspect the supplied merged changes against acceptance criteria. Return only the schema.'})
+            'feature_diff_before_merge': feature_diff,
+            'source_snapshot': sources, 'omitted_files': omitted,
+            'instruction': 'Review the authoritative diff and source snapshot supplied here. File-reading tools may be unavailable in this environment. Review supplied evidence directly; if context is insufficient report a gap instead of passing. For merged assessment inspect the supplied merged changes against acceptance criteria. Return only the schema.'})
         # stdin avoids shell quoting and command-line length limits. Integration
         # credentials are excluded; Codex uses its own existing login.
-        import subprocess
         from .core import clean_env
-        result = subprocess.run([self.config['codex'], 'exec', '--sandbox', 'read-only', '--ephemeral', '--ignore-user-config',
+        result = run_process([self.config['codex'], 'exec', '--sandbox', 'read-only', '--ephemeral', '--ignore-user-config',
                                  '--output-schema', str(schema), '--output-last-message', str(output), '-'],
-                                input=prompt, cwd=worktree, env=clean_env(), capture_output=True,
-                                text=True, encoding='utf-8', errors='replace',
+                                input=prompt, cwd=worktree, env=clean_env(),
                                 timeout=self.config['limits']['model_seconds'])
         (folder / 'transcript.txt').write_text(result.stdout + result.stderr, encoding='utf-8')
         if result.returncode:

@@ -21,6 +21,8 @@ class Workflow:
         existing = next((r for r in self.store.all() if r['key'] == key and r['stage'] not in ('done', 'closed')), None)
         if existing:
             return self.advance(existing)
+        if any(r['key'] == key for r in self.store.all()):
+            raise RuntimeError('This story already has a closed or completed run; inspect its PR and saved state before creating replacement work')
         if any(r['stage'] not in ('done', 'closed', 'exhausted') for r in self.store.all()):
             raise RuntimeError('Another story is active; resume or finish it first')
         task = self.jira.issue(key)
@@ -42,6 +44,15 @@ class Workflow:
             run['stage'] = 'develop'
         self.store.save(run)
 
+    def merge_gap(self, run, pr):
+        if not pr.get('merged'):
+            return 'PR is not merged'
+        if pr['head']['sha'] != run.get('qa_sha') or pr['head']['sha'] != run.get('review_sha') or not run.get('review', {}).get('passed'):
+            return 'Merged head lacks matching QA and passing Codex review'
+        if not self.github.checks_pass(pr['head']['sha']):
+            return 'Merged head checks are missing, pending, or unsuccessful'
+        return None
+
     def agent(self, run, role):
         log = lambda value: self.store.log(run['id'], role, value)
         tools = Tools(run['worktree'], role, self.config, log)
@@ -53,8 +64,8 @@ class Workflow:
         # Agents cannot modify the harness, CI, credentials or their own policy.
         paths = sorted(set(self.config['permissions']['developer'] + self.config['permissions']['qa']))
         for path in paths:
-            if (Path(cwd) / path).exists():
-                self.git('add', '--', path, cwd=cwd)
+            if (Path(cwd) / path).exists() or self.git('ls-files', '--', path, cwd=cwd):
+                self.git('add', '-A', '--', path, cwd=cwd)
         if self.git('diff', '--cached', '--name-only', cwd=cwd):
             self.git('commit', '-m', f"{run['key']}: implement and validate story", cwd=cwd)
         return self.git('rev-parse', 'HEAD', cwd=cwd)
@@ -73,8 +84,10 @@ class Workflow:
                         args += [cwd, run['branch']] if branches else ['-b', run['branch'], cwd, 'origin/' + self.config['github']['base']]
                         self.git(*args)
                     self.jira.transition(run['key'], 'developing')
+                    run.setdefault('base_sha', self.git('rev-parse', 'HEAD', cwd=cwd))
                     run['stage'] = 'develop'
                 elif stage == 'develop':
+                    self.jira.transition(run['key'], 'developing')
                     run['developer'] = self.agent(run, 'developer')
                     run['stage'] = 'qa'
                 elif stage == 'qa':
@@ -92,10 +105,16 @@ class Workflow:
                         self.store.save(run)
                         continue
                     self.git('push', '--set-upstream', 'origin', run['branch'], cwd=cwd)
-                    body = f"## {run['key']}\n{self.config['jira']['url']}/browse/{run['key']}\n\n" + json.dumps(run['qa'], indent=2)
+                    body = (f"## {run['key']}\n{self.config['jira']['url']}/browse/{run['key']}\n\n"
+                            + '## Implementation\n' + run.get('developer', {}).get('summary', '')
+                            + '\n\n## Acceptance evidence and tests\n```json\n' + json.dumps(run['qa'], indent=2)
+                            + '\n```\n\n## Review and limitations\nCodex review follows PR creation. '
+                            + 'Human merge is required; local headless checks do not establish visual quality. '
+                            + 'Logs remain in the local .runs directory; CI retains the Windows build artifact.')
                     pr = self.github.ensure_pr(run['branch'], f"{run['key']}: {run['task']['fields']['summary']}", body)
                     run['pr'], run['pr_url'] = pr['number'], pr['html_url']
                     self.jira.comment(run['key'], run['id'] + '-pr', 'Implementation ready for review: ' + run['pr_url'])
+                    self.jira.transition(run['key'], 'reviewing')
                     run['stage'] = 'review'
                 elif stage == 'review':
                     pr = self.github.pr(run['pr'])
@@ -114,6 +133,8 @@ class Workflow:
                     value = self.codex.review(cwd, run['task'], sha, 'review', run['qa'])
                     if self.github.pr(run['pr'])['head']['sha'] != sha:
                         continue
+                    if self.git('rev-parse', 'HEAD', cwd=cwd) != sha or self.git('status', '--porcelain', cwd=cwd):
+                        raise RuntimeError('Worktree changed during Codex review; report was not accepted')
                     self.github.comment(run['pr'], f"{run['id']}-review-{sha}", 'Codex review of `' + sha + '`\n```json\n' + json.dumps(value, indent=2) + '\n```')
                     run['review'], run['review_sha'] = value, sha
                     if not value['passed']:
@@ -124,10 +145,9 @@ class Workflow:
                     pr = self.github.pr(run['pr'])
                     if pr['merged']:
                         run.pop('merge_gap', None)
-                        if pr['head']['sha'] != run.get('review_sha') or pr['head']['sha'] != run.get('qa_sha') or not run.get('review', {}).get('passed'):
-                            run['merge_gap'] = 'Merged head lacks matching QA and passing Codex review'
-                        if not self.github.checks_pass(pr['head']['sha']):
-                            run['merge_gap'] = 'Merged head checks are missing, pending, or unsuccessful'
+                        gap = self.merge_gap(run, pr)
+                        if gap:
+                            run['merge_gap'] = gap
                         run['merge_sha'] = pr['merge_commit_sha']
                         run['stage'] = 'assess'
                     elif pr['state'] == 'closed':
@@ -140,12 +160,24 @@ class Workflow:
                         self.store.save(run)
                         return run
                 elif stage == 'assess':
+                    pr = self.github.pr(run['pr'])
+                    if not pr['merged'] or pr['merge_commit_sha'] != run['merge_sha']:
+                        raise RuntimeError('Cannot assess an unconfirmed merge')
+                    run.pop('merge_gap', None)
+                    gap = self.merge_gap(run, pr)
+                    if gap:
+                        run['merge_gap'] = gap
                     self.git('fetch', 'origin', self.config['github']['base'])
+                    if self.git('status', '--porcelain', cwd=cwd):
+                        raise RuntimeError('Assessment worktree must be clean')
                     self.git('checkout', '--detach', run['merge_sha'], cwd=cwd)
                     evidence = {'qa': run.get('qa'), 'review': run.get('review'),
                                 'merge_sha': run['merge_sha'], 'visual_observation': run.get('visual_observation'),
                                 'merge_gap': run.get('merge_gap'), 'feature_sha': run.get('qa_sha')}
+                    evidence['base_sha'] = run.get('base_sha')
                     value = self.codex.review(cwd, run['task'], run['merge_sha'], 'assessment', evidence)
+                    if self.git('rev-parse', 'HEAD', cwd=cwd) != run['merge_sha'] or self.git('status', '--porcelain', cwd=cwd):
+                        raise RuntimeError('Worktree changed during assessment; report was not accepted')
                     if run['key'] == 'KAN-8' and not run.get('visual_observation'):
                         value = {**value, 'passed': False, 'gaps': value.get('gaps', []) + ['Record a human observation of the exported desktop build with resume --visual-observation.']}
                     run['assessment'] = value
@@ -154,6 +186,8 @@ class Workflow:
                     pr = self.github.pr(run['pr'])
                     if not pr['merged'] or pr['merge_commit_sha'] != run['merge_sha']:
                         raise RuntimeError('Merge evidence changed; refusing Jira completion')
+                    if self.merge_gap(run, pr) or not run['assessment']['passed'] or (run['key'] == 'KAN-8' and not run.get('visual_observation')):
+                        raise RuntimeError('Completion evidence is no longer valid; resolve checks or acceptance gaps before resuming')
                     # External operations are reconciled from their authoritative
                     # systems, so a crash after HTTP success is safe to retry.
                     self.jira.comment(run['key'], run['id'] + '-merged', 'Merged: ' + run['pr_url'] + '\n' + json.dumps(run['assessment']))
@@ -179,8 +213,9 @@ class Workflow:
         if self.git('status', '--porcelain', cwd=cwd):
             raise RuntimeError('Worktree has local changes; resolve them before syncing remote head')
         self.git('fetch', 'origin', run['branch'])
-        self.git('checkout', run['branch'], cwd=cwd)
-        self.git('merge', '--ff-only', sha, cwd=cwd)
+        old_sha = self.git('rev-parse', 'HEAD', cwd=cwd)
+        self.git('update-ref', f"refs/tradewinds/backups/{run['id']}/{old_sha}", old_sha)
+        self.git('checkout', '-B', run['branch'], sha, cwd=cwd)
         run.pop('review_sha', None)
         run.pop('qa_sha', None)
 
