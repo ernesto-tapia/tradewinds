@@ -222,7 +222,7 @@ class HarnessTests(unittest.TestCase):
         self.assertEqual(receipt['exit_code'], 0)
         self.assertEqual(receipt['output'], 'export completed')
         launch = receipt['exported_executable_launch']
-        self.assertEqual(launch['command'][0], str(self.root / 'build/test.exe'))
+        self.assertEqual(Path(launch['command'][0]).resolve(), (self.root / 'build/test.exe').resolve())
         self.assertEqual(launch['exit_code'], 0)
         self.assertEqual(launch['output'], 'startup output')
         with patch('harness.core.command', side_effect=RuntimeError('later failure')):
