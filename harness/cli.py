@@ -13,6 +13,31 @@ from .core import Ollama
 from .workflow import Workflow
 
 
+def resolve_codex(configured):
+    override = os.environ.get('CODEX_BIN')
+    if override:
+        return override
+    if configured != 'codex':
+        return configured
+    on_path = shutil.which('codex')
+    if on_path:
+        return on_path
+    # Desktop installs are versioned and its private PATH is not inherited by
+    # independently opened PowerShell terminals. Discover rather than pin a hash.
+    local = os.environ.get('LOCALAPPDATA')
+    profile = os.environ.get('USERPROFILE') or os.environ.get('HOME')
+    roots = ([Path(local)] if local else []) + ([Path(profile) / 'AppData/Local'] if profile else [])
+    for appdata in roots:
+        folder = appdata / 'OpenAI/Codex/bin'
+        candidates = [p for p in folder.glob('*/codex.exe') if p.is_file()]
+        direct = folder / 'codex.exe'
+        if direct.is_file():
+            candidates.append(direct)
+        if candidates:
+            return str(max(candidates, key=lambda p: p.stat().st_mtime))
+    return configured
+
+
 def doctor(root, cfg):
     checks = {}
     def check(name, function):
@@ -88,7 +113,7 @@ def main():
     local_godot = root / '.tools/godot/Godot_v4.5.1-stable_win64_console.exe'
     if cfg['godot'] == 'godot' and local_godot.exists():
         cfg['godot'] = str(local_godot)
-    cfg['codex'] = os.environ.get('CODEX_BIN', cfg['codex'])
+    cfg['codex'] = resolve_codex(cfg['codex'])
     try:
         if args.command == 'doctor':
             return doctor(root, cfg)

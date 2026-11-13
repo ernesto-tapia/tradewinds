@@ -83,7 +83,11 @@ def request(url, data=None, headers=None, method=None, timeout=60):
             body = response.read()
             return json.loads(body) if body else None
     except urllib.error.HTTPError as error:
-        raise RuntimeError(f"HTTP {error.code} for {req.method} {url.split('?')[0]}") from None
+        hints = {401: 'Credentials were rejected; check the token, email, and expiration.',
+                 403: 'Access denied; check token permissions and account/repository access.',
+                 404: 'Resource unavailable; check the URL and token access to this resource.'}
+        error.close()
+        raise RuntimeError(f"HTTP {error.code} for {req.get_method()} {url.split('?')[0]}. {hints.get(error.code, '')}".strip()) from None
 
 
 def clean_env():

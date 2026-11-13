@@ -8,6 +8,8 @@ from unittest.mock import Mock, patch
 from harness.core import Ollama, Store, Tools, command, report
 from harness.workflow import Workflow
 from harness.integrations import GitHub, Jira
+from harness.core import request
+from harness.cli import resolve_codex
 
 
 class HarnessTests(unittest.TestCase):
@@ -20,6 +22,35 @@ class HarnessTests(unittest.TestCase):
                     'limits': {'repairs': 3, 'command_seconds': 1, 'turns': 2, 'model_seconds': 1},
                     'ollama': {'url': 'http://localhost', 'qa': 'model', 'context': 100},
                     'github': {'base': 'main'}, 'jira': {'url': 'https://example.test'}}
+
+    def test_http_errors_preserve_status_without_exposing_secrets(self):
+        import io
+        import urllib.error
+        for data, method in [(None, 'GET'), ({'example': True}, 'POST')]:
+            error = urllib.error.HTTPError('https://example.test', 401, 'Unauthorized', {}, io.BytesIO(b'secret server body'))
+            with patch('harness.core.urllib.request.urlopen', side_effect=error):
+                with self.assertRaises(RuntimeError) as raised:
+                    request('https://example.test/resource?secret=query', data, {'Authorization': 'Bearer private-token'})
+            message = str(raised.exception)
+            self.assertIn('HTTP 401 for ' + method, message)
+            self.assertIn('Credentials were rejected', message)
+            for secret in ('secret', 'private-token', 'Authorization'):
+                self.assertNotIn(secret, message)
+
+    def test_desktop_codex_discovery_without_path(self):
+        import os
+        older = self.root / 'OpenAI/Codex/bin/old/codex.exe'
+        newer = self.root / 'OpenAI/Codex/bin/new/codex.exe'
+        for path in (older, newer):
+            path.parent.mkdir(parents=True)
+            path.touch()
+        os.utime(older, (1, 1))
+        os.utime(newer, (2, 2))
+        with patch.dict(os.environ, {'LOCALAPPDATA': str(self.root)}, clear=True), patch('harness.cli.shutil.which', return_value=None):
+            self.assertEqual(resolve_codex('codex'), str(newer))
+            self.assertEqual(resolve_codex('custom.exe'), 'custom.exe')
+            with patch.dict(os.environ, {'CODEX_BIN': 'explicit.exe'}):
+                self.assertEqual(resolve_codex('codex'), 'explicit.exe')
 
     def test_role_permissions_and_traversal(self):
         tools = Tools(self.root, 'qa', self.cfg, lambda _: None)
