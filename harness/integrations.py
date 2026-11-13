@@ -164,11 +164,23 @@ class Codex:
         # stdin avoids shell quoting and command-line length limits. Integration
         # credentials are excluded; Codex uses its own existing login.
         from .core import clean_env
-        result = run_process([self.config['codex'], 'exec', '--sandbox', 'read-only', '--ephemeral', '--ignore-user-config',
-                                 '--output-schema', str(schema), '--output-last-message', str(output), '-'],
-                                input=prompt, cwd=worktree, env=clean_env(),
-                                timeout=self.config['limits']['model_seconds'])
-        (folder / 'transcript.txt').write_text(result.stdout + result.stderr, encoding='utf-8')
-        if result.returncode:
-            raise RuntimeError(f'Codex failed; inspect {folder / "transcript.txt"}')
-        return report(json.loads(output.read_text(encoding='utf-8')))
+        attempts = self.config['limits'].get('report_attempts', 2)
+        for attempt in range(attempts):
+            result = run_process([self.config['codex'], 'exec', '--sandbox', 'read-only', '--ephemeral', '--ignore-user-config',
+                                     '--output-schema', str(schema), '--output-last-message', str(output), '-'],
+                                    input=prompt, cwd=worktree, env=clean_env(),
+                                    timeout=self.config['limits']['model_seconds'])
+            transcript = folder / ('transcript.txt' if attempt == 0 else f'transcript-{attempt + 1}.txt')
+            transcript.write_text(result.stdout + result.stderr, encoding='utf-8')
+            if result.returncode:
+                raise RuntimeError(f'Codex failed; inspect {transcript}')
+            raw = output.read_text(encoding='utf-8')
+            try:
+                return report(json.loads(raw))
+            except (ValueError, TypeError) as error:
+                (folder / f'invalid-report-{attempt + 1}.json').write_text(raw, encoding='utf-8')
+                if attempt + 1 >= attempts:
+                    raise
+                output.unlink()
+                prompt += '\n' + json.dumps({'invalid_report': raw, 'validation_error': str(error),
+                    'instruction': 'Correct the report format while preserving the factual outcome and all real findings. gaps is ONLY blocking criteria for the current mode. Put nonblocking pending human approval notes in evidence or summary. passed=true requires gaps=[]. If any blocking finding remains use passed=false.'})

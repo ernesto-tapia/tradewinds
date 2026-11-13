@@ -7,7 +7,7 @@ from unittest.mock import Mock, patch
 
 from harness.core import Ollama, Store, Tools, command, report, action_call, git_command
 from harness.workflow import Workflow, plain_text
-from harness.integrations import GitHub, Jira
+from harness.integrations import GitHub, Jira, Codex
 from harness.core import request
 from harness.cli import resolve_codex
 
@@ -76,6 +76,25 @@ class HarnessTests(unittest.TestCase):
         for secret in ('private-github', 'private-jira', 'private@example.test'):
             self.assertNotIn(secret, text)
         self.assertEqual(result['jira_api_url_to_set'], 'https://api.atlassian.com/ex/jira/cloud')
+
+    def test_codex_corrects_inconsistent_report_without_dropping_findings(self):
+        prompts = self.root / 'prompts'
+        prompts.mkdir()
+        (prompts / 'reviewer.md').write_text('Review the supplied diff')
+        self.cfg['codex'] = 'codex'
+        reports = [dict(passed=True, summary='Clean PR review', evidence=[], gaps=['Human approval pending']),
+                   dict(passed=True, summary='Clean PR review; human approval pending', evidence=['Human approval pending'], gaps=[])]
+        def fake_process(args, **kwargs):
+            output = Path(args[args.index('--output-last-message') + 1])
+            output.write_text(json.dumps(reports.pop(0)), encoding='utf-8')
+            return subprocess.CompletedProcess(args, 0, 'transcript', '')
+        reviewer = Codex(self.cfg, prompts, self.root / 'artifacts')
+        with patch('harness.integrations.git_command', return_value=''), patch('harness.integrations.run_process', side_effect=fake_process) as execute:
+            value = reviewer.review(self.root, {}, 'abc', 'review', {})
+        self.assertTrue(value['passed'])
+        self.assertIn('Human approval pending', value['evidence'])
+        self.assertEqual(execute.call_count, 2)
+        self.assertTrue((self.root / 'artifacts/review-abc/invalid-report-1.json').exists())
 
     def test_role_permissions_and_traversal(self):
         tools = Tools(self.root, 'qa', self.cfg, lambda _: None)

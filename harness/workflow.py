@@ -167,6 +167,7 @@ class Workflow:
                             + 'Human merge is required; local headless checks do not establish visual quality. '
                             + 'Logs remain in the local .runs directory; CI retains the Windows build artifact.')
                     pr = self.github.ensure_pr(run['branch'], f"{run['key']}: {run['task']['fields']['summary']}", body)
+                    run['publication_transport'] = 'harness REST adapters'
                     run['pr'], run['pr_url'] = pr['number'], pr['html_url']
                     self.jira.comment(run['key'], run['id'] + '-pr', 'Implementation ready for review: ' + run['pr_url'])
                     self.jira.transition(run['key'], 'reviewing')
