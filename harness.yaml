@@ -1,0 +1,30 @@
+github:
+  repository: ernesto-tapia/tradewinds
+  base: main
+jira:
+  url: https://etapm94.atlassian.net
+  jql: 'labels = "caribbean-tradewinds" ORDER BY key ASC'
+  stages:
+    developing: ["En curso", "In Progress"]
+    done: ["Finalizada", "Listo", "Done", "Hecho"]
+ollama:
+  url: http://localhost:11434
+  developer: llama3.1:8b
+  qa: llama3.1:8b
+  context: 8192
+limits:
+  repairs: 3
+  turns: 30
+  command_seconds: 180
+  model_seconds: 300
+  poll_seconds: 60
+codex: codex
+godot: godot
+godot_version: "4.5.1"
+permissions:
+  developer: ["game/", "docs/game/", "tests/game/"]
+  qa: ["tests/game/"]
+commands:
+  validate: ["{godot}", "--headless", "--path", "game", "--editor", "--import", "--quit"]
+  smoke: ["{godot}", "--headless", "--path", "game", "--quit-after", "120"]
+  export: ["{godot}", "--headless", "--path", "game", "--export-release", "Windows Desktop", "../build/CaribbeanTradewinds.exe"]
