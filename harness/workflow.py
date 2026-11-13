@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 import re
+import subprocess
 import time
 import uuid
 
@@ -118,6 +119,35 @@ class Workflow:
             self.git('commit', '-m', f"{run['key']}: implement and validate story", cwd=cwd)
         return self.git('rev-parse', 'HEAD', cwd=cwd)
 
+    def verify_merged(self, run):
+        validation_root = (self.store.root / 'acceptance').resolve()
+        checkout = (validation_root / run['id'] / run['merge_sha'][:12]).resolve()
+        if not checkout.is_relative_to(validation_root):
+            raise PermissionError('Acceptance checkout escaped the run directory')
+        created = not checkout.exists()
+        if created:
+            checkout.parent.mkdir(parents=True, exist_ok=True)
+            self.git('worktree', 'add', '--detach', str(checkout), run['merge_sha'])
+        if self.git('rev-parse', 'HEAD', cwd=checkout) != run['merge_sha'] or self.git('status', '--porcelain', cwd=checkout):
+            raise RuntimeError('Acceptance checkout must be clean and match the merged commit')
+        log = lambda value: self.store.log(run['id'], 'assessment-checks', value)
+        tools = Tools(checkout, 'qa', self.config, log)
+        errors = []
+        for name in self.config['commands']:
+            try:
+                tools.call('run_check', {'name': name})
+                print(f'  merged acceptance: {name} passed', flush=True)
+            except (KeyError, ValueError, OSError, RuntimeError, subprocess.TimeoutExpired) as error:
+                errors.append(f'{name}: {error}')
+                log({'check': name, 'error': str(error)})
+                break
+        clean = not self.git('status', '--porcelain', cwd=checkout)
+        if not clean:
+            errors.append('Acceptance checks changed tracked or unignored source files')
+        return {'sha': run['merge_sha'], 'checkout': str(checkout), 'fresh_checkout': created,
+                'source_clean': clean, 'passed': not errors and set(tools.checks) == set(self.config['commands']),
+                'checks': tools.receipts, 'errors': errors}
+
     def advance(self, run, stop_before=None):
         try:
             while True:
@@ -227,18 +257,27 @@ class Workflow:
                     if self.git('status', '--porcelain', cwd=cwd):
                         raise RuntimeError('Assessment worktree must be clean')
                     self.git('checkout', '--detach', run['merge_sha'], cwd=cwd)
+                    run['assessment_validation'] = self.verify_merged(run)
                     evidence = {'qa': run.get('qa'), 'review': run.get('review'),
                                 'merge_sha': run['merge_sha'], 'visual_observation': run.get('visual_observation'),
                                 'merge_gap': run.get('merge_gap'), 'feature_sha': run.get('qa_sha')}
                     evidence['base_sha'] = run.get('base_sha')
+                    evidence['merged_commit_validation'] = run['assessment_validation']
                     value = self.codex.review(cwd, run['task'], run['merge_sha'], 'assessment', evidence)
                     if self.git('rev-parse', 'HEAD', cwd=cwd) != run['merge_sha'] or self.git('status', '--porcelain', cwd=cwd):
                         raise RuntimeError('Worktree changed during assessment; report was not accepted')
                     if run['key'] == 'KAN-8' and not run.get('visual_observation'):
                         value = {**value, 'passed': False, 'gaps': value.get('gaps', []) + ['Record a human observation of the exported desktop build with resume --visual-observation.']}
+                    if not run['assessment_validation']['passed']:
+                        value = {**value, 'passed': False, 'gaps': value.get('gaps', []) + run['assessment_validation']['errors']}
                     run['assessment'] = value
                     run['stage'] = 'complete' if value['passed'] and not run.get('merge_gap') else 'acceptance_gap'
                 elif stage == 'complete':
+                    validation = run.get('assessment_validation', {})
+                    if not validation.get('passed') or validation.get('sha') != run['merge_sha']:
+                        run['stage'] = 'assess'
+                        self.store.save(run)
+                        continue
                     pr = self.github.pr(run['pr'])
                     if not pr['merged'] or pr['merge_commit_sha'] != run['merge_sha']:
                         raise RuntimeError('Merge evidence changed; refusing Jira completion')

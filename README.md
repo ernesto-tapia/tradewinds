@@ -62,6 +62,10 @@ State lives in ignored `.runs/state.sqlite`; logs and worktrees are under `.runs
 
 Post-merge completion requires a matching reviewed head, successful GitHub checks, and Codex acceptance assessment. Gaps leave Jira open. Jira destinations must match your site's actual workflow; `doctor` verifies connectivity, and a missing stage transition fails visibly. Epics are never run as stories.
 
+During post-merge assessment the harness validates and exports the exact merge commit in an isolated, clean detached checkout under `.runs/acceptance/`. Codex receives actual command arguments, working directories, exit codes and runtime output, including the exported-executable launch. These receipts remain in `assessment-checks.jsonl`; summaries alone are not treated as runtime proof. Failed merged-build checks prevent completion even if the model reports success.
+
+`acceptance_gap` is a deliberate pause, not a repeating repair loop. `status` shows its specific gaps. Stop a running watcher with Ctrl+C, then use `resume RUN_ID --visual-observation ...` to record your real playtest observations and reassess. The assistant's visual check does not substitute for your human note.
+
 ## Validation
 
 If authentication fails, run `.\.venv\Scripts\python.exe scripts/check_auth.py` in the terminal containing your tokens. It prints only formatting booleans and HTTP status codes; response bodies and credential values are never displayed. It tests GitHub account and repository access separately, and both direct-site and scoped-token Jira routes. A scoped token needs the Atlassian gateway: if the diagnostic returns `jira_api_url_to_set`, set `$env:JIRA_API_URL` to that URL and rerun `doctor`. Keep `jira.url` as the human-facing site URL. See [Atlassian token routing](https://support.atlassian.com/atlassian-account/docs/manage-api-tokens-for-your-atlassian-account/).

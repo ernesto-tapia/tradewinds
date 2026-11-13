@@ -156,10 +156,33 @@ class HarnessTests(unittest.TestCase):
         self.assertTrue(result.startswith('unchanged'))
         self.assertEqual(tools.checks, {'validate': True})
 
+    def test_export_receipt_contains_real_command_and_launch_results(self):
+        self.cfg['commands'] = {'export': ['export-tool', '--release']}
+        self.cfg['export_artifact'] = 'build/test.exe'
+        (self.root / 'build').mkdir()
+        (self.root / 'build/test.exe').touch()
+        tools = Tools(self.root, 'qa', self.cfg, lambda _: None)
+        with patch('harness.core.command', side_effect=['export completed', 'startup output']):
+            tools.call('run_check', {'name': 'export'})
+        receipt = tools.receipts['export']
+        self.assertEqual(receipt['command'], ['export-tool', '--release'])
+        self.assertEqual(receipt['exit_code'], 0)
+        self.assertEqual(receipt['output'], 'export completed')
+        launch = receipt['exported_executable_launch']
+        self.assertEqual(launch['command'][0], str(self.root / 'build/test.exe'))
+        self.assertEqual(launch['exit_code'], 0)
+        self.assertEqual(launch['output'], 'startup output')
+        with patch('harness.core.command', side_effect=RuntimeError('later failure')):
+            with self.assertRaises(RuntimeError):
+                tools.call('run_check', {'name': 'export'})
+        self.assertNotIn('export', tools.receipts)
+
     def workflow(self):
         store = Store(self.root / 'state')
         self.addCleanup(store.db.close)
         workflow = Workflow(self.root, self.cfg, store, Mock(), Mock(), Mock(), Mock())
+        workflow.verify_merged = Mock(return_value={'sha': 'merge', 'passed': True,
+            'checks': {'validate': {'command': ['fixture-check'], 'cwd': str(self.root), 'exit_code': 0, 'output': 'verified fixture output'}}, 'errors': []})
         return workflow, store
 
     def run_data(self, stage):
@@ -220,6 +243,7 @@ class HarnessTests(unittest.TestCase):
         run['assessment'] = {'passed': True}
         run['merge_sha'] = 'merge'
         run['visual_observation'] = 'Launched visibly'
+        run['assessment_validation'] = workflow.verify_merged.return_value
         workflow.github.pr.return_value = {'merged': True, 'merge_commit_sha': 'merge', 'head': {'sha': 'abc'}}
         workflow.github.checks_pass.return_value = True
         workflow.jira.transition.side_effect = [RuntimeError('Jira unavailable'), None]
@@ -321,6 +345,59 @@ class HarnessTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'must be clean'):
             workflow.advance(run)
         workflow.codex.review.assert_not_called()
+
+    def test_assessment_receives_command_results_for_merged_commit(self):
+        workflow, _ = self.workflow()
+        run = self.run_data('assess')
+        run.update(merge_sha='merge', visual_observation='Observed the boxes')
+        workflow.github.pr.return_value = {'merged': True, 'head': {'sha': 'abc'}, 'merge_commit_sha': 'merge'}
+        workflow.github.checks_pass.return_value = True
+        workflow.git = Mock(side_effect=lambda *args, **kwargs: 'merge' if args[0] == 'rev-parse' else '')
+        workflow.codex.review.return_value = {'passed': True, 'gaps': []}
+        self.assertEqual(workflow.advance(run)['stage'], 'done')
+        evidence = workflow.codex.review.call_args.args[4]
+        self.assertEqual(evidence['merged_commit_validation']['sha'], 'merge')
+        self.assertEqual(evidence['merged_commit_validation']['checks']['validate']['output'], 'verified fixture output')
+
+    def test_failed_merged_checks_override_optimistic_assessment(self):
+        workflow, _ = self.workflow()
+        run = self.run_data('assess')
+        run.update(merge_sha='merge', visual_observation='Observed boxes')
+        workflow.github.pr.return_value = {'merged': True, 'head': {'sha': 'abc'}, 'merge_commit_sha': 'merge'}
+        workflow.github.checks_pass.return_value = True
+        workflow.git = Mock(side_effect=lambda *args, **kwargs: 'merge' if args[0] == 'rev-parse' else '')
+        workflow.verify_merged.return_value = {'sha': 'merge', 'passed': False, 'checks': {}, 'errors': ['export failed']}
+        workflow.codex.review.return_value = {'passed': True, 'gaps': []}
+        self.assertEqual(workflow.advance(run)['stage'], 'acceptance_gap')
+        self.assertIn('export failed', run['assessment']['gaps'])
+        workflow.jira.transition.assert_not_called()
+
+    def test_merged_validation_uses_isolated_checkout_and_detects_source_changes(self):
+        import sys
+        workflow, _ = self.workflow()
+        command(['git', 'init', '--initial-branch=main'], self.root)
+        command(['git', 'config', 'user.name', 'Harness Test'], self.root)
+        command(['git', 'config', 'user.email', 'harness@example.test'], self.root)
+        (self.root / 'README.md').write_text('fixture')
+        (self.root / '.gitignore').write_text('state/\nbuild/\n')
+        command(['git', 'add', 'README.md', '.gitignore'], self.root)
+        command(['git', 'commit', '-m', 'fixture'], self.root)
+        sha = workflow.git('rev-parse', 'HEAD')
+        run = self.run_data('assess')
+        run['merge_sha'] = sha
+        self.cfg['commands'] = {'validate': [sys.executable, '-c', "print('actual runtime receipt')"]}
+        proof = Workflow.verify_merged(workflow, run)
+        self.assertTrue(proof['passed'])
+        self.assertTrue(proof['fresh_checkout'])
+        self.assertNotEqual(Path(proof['checkout']), self.root)
+        self.assertEqual(proof['sha'], sha)
+        self.assertEqual(proof['checks']['validate']['exit_code'], 0)
+        self.assertIn('actual runtime receipt', proof['checks']['validate']['output'])
+        self.cfg['commands']['validate'] = [sys.executable, '-c', "from pathlib import Path; Path('README.md').write_text('modified')"]
+        proof = Workflow.verify_merged(workflow, run)
+        self.assertFalse(proof['passed'])
+        self.assertFalse(proof['source_clean'])
+        self.assertIn('Acceptance checks changed tracked or unignored source files', proof['errors'])
 
     def test_edit_during_review_is_rejected(self):
         workflow, _ = self.workflow()

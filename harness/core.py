@@ -168,6 +168,7 @@ class Tools:
     def __init__(self, root, role, config, log):
         self.root, self.role, self.config, self.log = Path(root).resolve(), role, config, log
         self.checks = {}
+        self.receipts = {}
 
     def path(self, name, write=False):
         rel = Path(name)
@@ -198,6 +199,7 @@ class Tools:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(args["content"], encoding="utf-8", newline='\n')
             self.checks.clear()
+            self.receipts.clear()
             return "written"
         if name == "run_check":
             key = args["name"]
@@ -206,24 +208,30 @@ class Tools:
             if missing:
                 raise RuntimeError('Run required checks successfully first: ' + ', '.join(missing))
             self.checks.pop(key, None)
+            self.receipts.pop(key, None)
             (self.root / "build").mkdir(exist_ok=True)
-            result = command([s.replace("{godot}", self.config["godot"]).replace('{harness_root}', str(Path(__file__).resolve().parents[1])) for s in argv], self.root,
+            resolved = [s.replace("{godot}", self.config["godot"]).replace('{harness_root}', str(Path(__file__).resolve().parents[1])) for s in argv]
+            result = command(resolved, self.root,
                              self.config["limits"]["command_seconds"])
             if any(x in result for x in ("SCRIPT ERROR:", "Parse Error:", "ERROR:")):
                 lines = result.splitlines()
                 errors = [line for i, line in enumerate(lines) if any('ERROR:' in prior or 'Parse Error:' in prior for prior in lines[max(0, i-2):i+1])]
                 raise RuntimeError('\n'.join(errors)[-4000:])
+            receipt = {'command': resolved, 'cwd': str(self.root), 'exit_code': 0, 'output': result}
             if key == 'export' and self.config.get('export_artifact'):
                 artifact = self.path(self.config['export_artifact'])
                 if not artifact.is_file():
                     raise RuntimeError('Exported executable is missing')
-                smoke = command([str(artifact), '--headless', '--quit-after', '120'], artifact.parent,
+                smoke_command = [str(artifact), '--headless', '--quit-after', '120']
+                smoke = command(smoke_command, artifact.parent,
                                 self.config['limits']['command_seconds'])
                 if 'ERROR:' in smoke:
                     raise RuntimeError(smoke[-10000:])
                 result += '\nExported executable smoke test:\n' + smoke
+                receipt['exported_executable_launch'] = {'command': smoke_command, 'cwd': str(artifact.parent), 'exit_code': 0, 'output': smoke}
             self.checks[key] = True
-            self.log({"check": key, "output": result})
+            self.receipts[key] = receipt
+            self.log({"check": key, "output": result, 'receipt': receipt})
             return result[-1500:] or "exit 0"
         raise PermissionError("Unknown tool")
 

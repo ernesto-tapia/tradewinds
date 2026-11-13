@@ -122,7 +122,14 @@ def main():
             return doctor(root, cfg)
         store = Store(root / '.runs')
         if args.command == 'status':
-            print(json.dumps([{k: r.get(k) for k in ('id', 'key', 'stage', 'repairs', 'pr_url', 'checks_pass', 'error')} for r in store.all()], indent=2))
+            rows = []
+            for run in store.all():
+                row = {k: run.get(k) for k in ('id', 'key', 'stage', 'repairs', 'pr_url', 'checks_pass', 'error')}
+                if run['stage'] == 'acceptance_gap':
+                    row['acceptance_gaps'] = run.get('assessment', {}).get('gaps', [])
+                    row['playtest_note_recorded'] = bool(run.get('visual_observation'))
+                rows.append(row)
+            print(json.dumps(rows, indent=2))
             return 0
         if args.command == 'backlog':
             print(json.dumps(Jira(cfg).search(cfg['jira']['jql']), indent=2))
