@@ -14,4 +14,4 @@
 ## Prerequisites for Exporting from a Clean Checkout
 
 1. Install the matching Godot 4.5.1 export templates.
-2. Create the build directory at `../build/CaribbeanTradewinds.exe`.
+2. Create the build directory at `../build/`.
