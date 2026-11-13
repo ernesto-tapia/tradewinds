@@ -5,14 +5,67 @@ import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
-from harness.core import Ollama, Store, Tools, command, report, action_call, git_command
+from harness.core import Ollama, CodexActions, agent_client, Store, Tools, command, report, action_call, git_command
 from harness.workflow import Workflow, plain_text
 from harness.integrations import GitHub, Jira, Codex
 from harness.core import request
-from harness.cli import resolve_codex
+from harness.cli import resolve_codex, run_summary
 
 
 class HarnessTests(unittest.TestCase):
+    def test_summary_distinguishes_pending_checks_and_stale_qa(self):
+        run = {'key': 'KAN-9', 'stage': 'waiting_merge', 'sha': 'current',
+               'qa': {'passed': True}, 'qa_sha': 'current',
+               'review': {'passed': True}, 'review_sha': 'current', 'checks_pass': False,
+               'pr_url': 'https://example.test/pull/2'}
+        summary = run_summary(run)
+        self.assertIn('QA: passed', summary)
+        self.assertIn('not confirmed passing', summary)
+        self.assertIn('Merge manually', summary)
+        run.update(stage='exhausted', sha='changed', feedback=[{'gaps': ['Godot parse error']}])
+        summary = run_summary(run)
+        self.assertIn('previous report', summary)
+        self.assertNotIn('QA: passed', summary)
+        self.assertIn('Blocker: Godot parse error', summary)
+
+    def test_sol_fallback_only_after_local_failure(self):
+        self.cfg['agents'] = {'provider': 'ollama', 'fallback': 'codex',
+                              'model': 'gpt-6.1-sol', 'reasoning_effort': 'medium'}
+        client = agent_client(self.cfg, self.root)
+        tools = Tools(self.root, 'developer', self.cfg, lambda _: None)
+        passed = {'passed': True, 'summary': 'ok', 'evidence': [], 'gaps': []}
+        failed = {**passed, 'passed': False, 'gaps': ['invalid actions']}
+        with patch.object(client.local, 'run', return_value=passed), patch.object(client.remote, 'run') as remote:
+            self.assertEqual(client.run('developer', {}, tools), passed)
+            remote.assert_not_called()
+        with patch.object(client.local, 'run', return_value=failed), patch.object(client.remote, 'run', return_value=passed) as remote:
+            self.assertEqual(client.run('developer', {}, tools), passed)
+            self.assertEqual(remote.call_args.args[1]['local_failure'], failed)
+            self.assertEqual(remote.call_count, 1)
+        self.assertIs(tools.config, self.cfg)
+
+    def test_codex_actions_use_medium_and_host_permissions(self):
+        self.cfg['agents'] = {'provider': 'codex', 'model': 'gpt-6.1-sol', 'reasoning_effort': 'medium'}
+        self.cfg['codex'] = 'codex'
+        client = agent_client(self.cfg, self.root)
+        self.assertIsInstance(client, CodexActions)
+        tools = Tools(self.root, 'qa', self.cfg, lambda _: None)
+        def generate(argv, **kwargs):
+            output = Path(argv[argv.index('--output-last-message') + 1])
+            output.write_text(json.dumps({'action': 'write_file', 'arguments': {
+                'path': 'game/main.gd', 'content': 'forbidden', 'name': None}}))
+            self.assertEqual(argv[argv.index('--model') + 1], 'gpt-6.1-sol')
+            self.assertIn('model_reasoning_effort="medium"', argv)
+            self.assertEqual(argv[argv.index('--sandbox') + 1], 'read-only')
+            self.assertNotIn('GITHUB_TOKEN', kwargs['env'])
+            return subprocess.CompletedProcess(argv, 0, '', '')
+        from harness.core import ACTION_SCHEMA
+        with patch('harness.core.run_process', side_effect=generate):
+            response = client.chat(self.cfg, 'qa', [], ACTION_SCHEMA, tools)
+        name, args = action_call(json.loads(response['message']['content']))
+        with self.assertRaises(PermissionError):
+            tools.call(name, args)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
@@ -169,7 +222,7 @@ class HarnessTests(unittest.TestCase):
         self.assertEqual(receipt['exit_code'], 0)
         self.assertEqual(receipt['output'], 'export completed')
         launch = receipt['exported_executable_launch']
-        self.assertEqual(launch['command'][0], str(self.root / 'build/test.exe'))
+        self.assertEqual(Path(launch['command'][0]).resolve(), (self.root / 'build/test.exe').resolve())
         self.assertEqual(launch['exit_code'], 0)
         self.assertEqual(launch['output'], 'startup output')
         with patch('harness.core.command', side_effect=RuntimeError('later failure')):
@@ -183,6 +236,7 @@ class HarnessTests(unittest.TestCase):
         workflow = Workflow(self.root, self.cfg, store, Mock(), Mock(), Mock(), Mock())
         workflow.verify_merged = Mock(return_value={'sha': 'merge', 'passed': True,
             'checks': {'validate': {'command': ['fixture-check'], 'cwd': str(self.root), 'exit_code': 0, 'output': 'verified fixture output'}}, 'errors': []})
+        workflow.has_feature_changes = Mock(return_value=True)
         return workflow, store
 
     def run_data(self, stage):
@@ -199,6 +253,39 @@ class HarnessTests(unittest.TestCase):
         self.assertEqual(result['stage'], 'exhausted')
         self.assertEqual(result['repairs'], 3)
         self.assertEqual(workflow.agent.call_count, 4)  # QA failure + 3 failed developer repairs
+
+    def test_unchanged_publish_returns_to_development_without_pr_request(self):
+        workflow, _ = self.workflow()
+        run = self.run_data('publish')
+        workflow.git = Mock(side_effect=lambda *args, **kwargs: 'abc' if args[0] == 'rev-parse' else '')
+        workflow.agent = Mock(side_effect=RuntimeError('stop at development'))
+        with self.assertRaisesRegex(RuntimeError, 'stop at development'):
+            workflow.advance(run)
+        self.assertEqual(run['stage'], 'develop')
+        self.assertEqual(run['repairs'], 1)
+        self.assertIn('no implementation changes', run['feedback'][-1]['summary'])
+        workflow.github.ensure_pr.assert_not_called()
+        self.assertFalse(any(call.args[0] == 'push' for call in workflow.git.call_args_list))
+
+    def test_developer_cannot_finish_unchanged_story(self):
+        workflow, _ = self.workflow()
+        run = self.run_data('develop')
+        run['repairs'] = 3
+        workflow.agent = Mock(return_value={'passed': True})
+        workflow.has_feature_changes.return_value = False
+        self.assertEqual(workflow.advance(run)['stage'], 'exhausted')
+        self.assertEqual(workflow.agent.call_count, 1)
+        workflow.github.ensure_pr.assert_not_called()
+
+    def test_story_checks_are_ordered_and_do_not_modify_baseline_config(self):
+        workflow, _ = self.workflow()
+        self.cfg['commands'] = {name: ['fake'] for name in ('validate', 'scene', 'smoke', 'export')}
+        self.cfg['check_dependencies'] = {'scene': ['validate'], 'smoke': ['scene'], 'export': ['smoke']}
+        self.cfg['stories'] = {'KAN-9': {'commands': {'feature': ['feature-test']},
+            'check_dependencies': {'feature': ['scene'], 'smoke': ['feature']}}}
+        cfg = workflow.story_config({'key': 'KAN-9'})
+        self.assertEqual(list(cfg['commands']), ['validate', 'scene', 'feature', 'smoke', 'export'])
+        self.assertNotIn('feature', self.cfg['commands'])
 
     def test_closed_pr_never_completes(self):
         workflow, _ = self.workflow()
@@ -537,6 +624,37 @@ class HarnessTests(unittest.TestCase):
         self.assertFalse(result['passed'])
         self.assertIn('budget exhausted', result['summary'])
         self.assertEqual(result['gaps'], ['invalid project syntax'])
+
+    def test_repeated_failed_action_stops_before_context_fills(self):
+        prompts = self.root / 'prompts'
+        prompts.mkdir()
+        (prompts / 'developer.md').write_text('develop')
+        self.cfg['ollama'].update(protocol='json_actions', developer='model')
+        self.cfg['limits'].update(turns=30, no_progress=3)
+        action = {'message': {'role': 'assistant', 'content': json.dumps({'action': 'run_check', 'arguments': {'name': 'validate'}})}}
+        with patch('harness.core.request', return_value=action) as req, patch('harness.core.command', side_effect=RuntimeError('unchanged parse error')):
+            result = Ollama(self.cfg, prompts).run('developer', {}, Tools(self.root, 'developer', self.cfg, lambda _: None))
+        self.assertFalse(result['passed'])
+        self.assertEqual(req.call_count, 3)
+        self.assertIn('ineffective action', result['summary'])
+
+    def test_repeated_unusable_outputs_stop_without_execution(self):
+        prompts = self.root / 'prompts'
+        prompts.mkdir()
+        (prompts / 'developer.md').write_text('develop')
+        self.cfg['ollama'].update(protocol='json_actions', developer='model')
+        self.cfg['limits'].update(turns=30, no_progress=3)
+        for response in (
+            {'done_reason': 'length', 'message': {'role': 'assistant', 'content': '{}'}},
+            {'message': {'role': 'assistant', 'content': 'invalid JSON'}},
+        ):
+            with self.subTest(response=response), patch('harness.core.request', return_value=response) as req:
+                tools = Tools(self.root, 'developer', self.cfg, lambda _: None)
+                with patch.object(tools, 'call') as call:
+                    result = Ollama(self.cfg, prompts).run('developer', {}, tools)
+                self.assertFalse(result['passed'])
+                self.assertEqual(req.call_count, 3)
+                call.assert_not_called()
 
     def test_simple_asset_policy_blocks_image_files(self):
         self.cfg['asset_policy'] = 'labeled_boxes'

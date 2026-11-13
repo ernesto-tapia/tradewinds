@@ -9,7 +9,7 @@ import yaml
 
 from .core import Store, command, request, git_command
 from .integrations import Codex, GitHub, Jira
-from .core import Ollama
+from .core import agent_client
 from .workflow import Workflow
 
 
@@ -36,6 +36,42 @@ def resolve_codex(configured):
         if candidates:
             return str(max(candidates, key=lambda p: p.stat().st_mtime))
     return configured
+
+
+def run_summary(run):
+    """Describe saved state without treating historical reports as current approval."""
+    stage = run['stage']
+    lines = [f"Summary: {run['key']} — {stage.replace('_', ' ')}."]
+    developer = run.get('developer', {})
+    if developer.get('summary'):
+        lines.append('Development: ' + developer['summary'])
+    for key, label in (('qa', 'QA'), ('review', 'Codex review')):
+        value = run.get(key) or {}
+        if value:
+            current = run.get(key + '_sha') == run.get('sha') and bool(run.get('sha'))
+            outcome = ('passed' if value.get('passed') else 'failed') if current else 'previous report; current approval not established'
+            lines.append(f'{label}: {outcome}.')
+    if run.get('pr_url'):
+        lines.append('PR: ' + run['pr_url'])
+    if stage == 'waiting_merge':
+        checks = run.get('checks_pass')
+        lines.append('GitHub checks: ' + ('passed.' if checks is True else 'not confirmed passing; they may be pending, missing, or failed.'))
+        lines.append('Next: inspect the PR checks and launch the game for visual review. Merge manually when satisfied, then resume this run to assess acceptance and update Jira.')
+    elif stage in ('acceptance_gap', 'exhausted'):
+        latest = (run.get('assessment') or {}) if stage == 'acceptance_gap' else ((run.get('feedback') or [{}])[-1])
+        gaps = latest.get('gaps') or []
+        lines.extend('Blocker: ' + gap for gap in gaps)
+        lines.append('Next: resolve the acceptance gaps, then resume.' if stage == 'acceptance_gap' else
+                     'Next: inspect the failure evidence and adjust the model or guidance before using resume --retry.')
+    elif stage == 'done':
+        lines.append('Merged acceptance was confirmed and the Jira completion update finished.')
+    elif stage == 'closed':
+        lines.append('The PR was closed without merging; this run did not complete the Jira story.')
+    else:
+        lines.append('Next: resume this run to continue from its saved stage.')
+    if run.get('error'):
+        lines.append('Error: ' + str(run['error']))
+    return '\n'.join(lines)
 
 
 def doctor(root, cfg):
@@ -69,7 +105,16 @@ def doctor(root, cfg):
         if not required <= names:
             raise RuntimeError('Missing models: ' + ', '.join(required - names))
         return sorted(names)
-    check('ollama', models)
+    if cfg.get('agents', {}).get('provider', 'ollama') == 'ollama':
+        check('ollama', models)
+    else:
+        def agent_settings():
+            if cfg['agents']['provider'] != 'codex' or not cfg['agents'].get('model'):
+                raise ValueError('Configure agents.provider and agents.model')
+            if cfg['agents'].get('reasoning_effort') not in ('low', 'medium', 'high', 'xhigh'):
+                raise ValueError('Invalid agents.reasoning_effort')
+            return cfg['agents']
+        check('agents', agent_settings)
     check('github', lambda: GitHub(cfg).get('')['full_name'])
     check('jira', lambda: Jira(cfg).get('/myself')['displayName'])
     def commands():
@@ -84,8 +129,8 @@ def doctor(root, cfg):
     def limits():
         if type(cfg['ollama'].get('max_output_tokens', 2048)) is not int or cfg['ollama'].get('max_output_tokens', 2048) <= 0:
             raise ValueError('ollama.max_output_tokens must be a positive integer')
-        for name in ('turns', 'report_attempts', 'command_seconds', 'model_seconds', 'poll_seconds'):
-            value = cfg['limits'].get(name, 2 if name == 'report_attempts' else None)
+        for name in ('turns', 'report_attempts', 'no_progress', 'command_seconds', 'model_seconds', 'poll_seconds'):
+            value = cfg['limits'].get(name, {'report_attempts': 2, 'no_progress': 3}.get(name))
             if type(value) is not int or value <= 0:
                 raise ValueError(f'limits.{name} must be a positive integer')
         if type(cfg['limits']['repairs']) is not int or cfg['limits']['repairs'] < 0:
@@ -136,7 +181,7 @@ def main():
             return 0
         with store.lock():
             github, jira = GitHub(cfg), Jira(cfg)
-            workflow = Workflow(root, cfg, store, github, jira, Ollama(cfg, root / 'prompts'),
+            workflow = Workflow(root, cfg, store, github, jira, agent_client(cfg, root / 'prompts'),
                                 Codex(cfg, root / 'prompts', store.root / 'codex'))
             if args.command == 'run':
                 if doctor(root, cfg):
@@ -160,6 +205,7 @@ def main():
                 workflow.watch(args.once)
                 return 0
             print(json.dumps(run, indent=2))
+            print('\n' + run_summary(run))
             return 1 if run['stage'] in ('exhausted', 'acceptance_gap') else 0
     except (Exception, KeyboardInterrupt) as error:
         print(f'{type(error).__name__}: {error}', file=sys.stderr)

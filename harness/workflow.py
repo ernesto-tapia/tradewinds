@@ -1,4 +1,6 @@
 import json
+import copy
+from graphlib import TopologicalSorter
 from pathlib import Path
 import re
 import subprocess
@@ -54,6 +56,7 @@ class Workflow:
 
     def repair(self, run, feedback):
         run['feedback'].append(feedback)
+        run.pop('error', None)
         if run['repairs'] >= self.config['limits']['repairs']:
             run['stage'] = 'exhausted'
         else:
@@ -82,6 +85,31 @@ class Workflow:
             return 'Merged head checks are missing, pending, or unsuccessful'
         return None
 
+    def story_config(self, run):
+        cfg = copy.deepcopy(self.config)
+        story = cfg.get('stories', {}).get(run['key'], {})
+        cfg['commands'].update(story.get('commands', {}))
+        cfg.setdefault('check_dependencies', {}).update(story.get('check_dependencies', {}))
+        graph = {name: cfg['check_dependencies'].get(name, []) for name in cfg['commands']}
+        order = list(TopologicalSorter(graph).static_order())
+        if any(name not in cfg['commands'] for name in order):
+            raise ValueError('Check dependency references an unknown command')
+        cfg['commands'] = {name: cfg['commands'][name] for name in order}
+        return cfg
+
+    def has_feature_changes(self, run):
+        base = run.get('base_sha', 'origin/' + self.config['github']['base'])
+        paths = sorted(set(self.config['permissions']['developer'] + self.config['permissions']['qa']))
+        cwd = run['worktree']
+        return any((self.git('diff', '--name-only', base + '...HEAD', '--', *paths, cwd=cwd),
+                    self.git('diff', '--name-only', 'HEAD', '--', *paths, cwd=cwd),
+                    self.git('ls-files', '--others', '--exclude-standard', '--', *paths, cwd=cwd)))
+
+    def no_changes(self, run):
+        return {'passed': False, 'summary': f"{run['key']} has no implementation changes",
+                'evidence': ['The existing project passes baseline regression checks only.'],
+                'gaps': ['Implement the current Jira story. An unchanged existing project is not a completed feature and cannot produce a PR.']}
+
     def agent(self, run, role):
         def log(value):
             self.store.log(run['id'], role, value)
@@ -90,7 +118,8 @@ class Workflow:
                 print(f"  {role}: {value['tool']} {'failed' if failed else 'ok'}", flush=True)
             elif 'check' in value:
                 print(f"  {role}: {value['check']} passed", flush=True)
-        tools = Tools(run['worktree'], role, self.config, log)
+        cfg = self.story_config(run)
+        tools = Tools(run['worktree'], role, cfg, log)
         fields = run['task']['fields']
         files = tools.call('list_files', {})
         existing, remaining = {}, 8000
@@ -98,14 +127,20 @@ class Workflow:
             if not name.startswith(('game/', 'docs/game/', 'tests/game/')) or Path(name).suffix not in ('.gd', '.godot', '.tscn', '.cfg', '.md'):
                 continue
             content = tools.call('read_file', {'path': name})
-            if len(content) <= min(4000, remaining):
+            if len(content) <= remaining:
                 existing[name] = content
                 remaining -= len(content)
         task = {'issue': {'key': run['key'], 'summary': fields['summary'],
                           'description': plain_text(fields.get('description')).strip()},
                 'feedback': [{k: f[k] for k in ('summary', 'gaps') if k in f} for f in run['feedback'][-1:]],
-                'files': files, 'existing_files': existing, 'configured_checks': list(self.config['commands']),
+                'files': files, 'existing_files': existing, 'configured_checks': list(cfg['commands']),
                 'asset_policy': 'Use only simple rectangles with text labels inside. No generated images, sprites, external art, complex shapes, models or audio.'}
+        guidance = cfg.get('stories', {}).get(run['key'], {}).get('guidance')
+        if guidance:
+            path = (self.root / guidance).resolve()
+            if not path.is_relative_to(self.root):
+                raise PermissionError('Story guidance must be within the workspace')
+            task['current_story_guidance'] = path.read_text(encoding='utf-8')
         return self.ollama.run(role, task, tools)
 
     def commit(self, run):
@@ -131,9 +166,10 @@ class Workflow:
         if self.git('rev-parse', 'HEAD', cwd=checkout) != run['merge_sha'] or self.git('status', '--porcelain', cwd=checkout):
             raise RuntimeError('Acceptance checkout must be clean and match the merged commit')
         log = lambda value: self.store.log(run['id'], 'assessment-checks', value)
-        tools = Tools(checkout, 'qa', self.config, log)
+        cfg = self.story_config(run)
+        tools = Tools(checkout, 'qa', cfg, log)
         errors = []
-        for name in self.config['commands']:
+        for name in cfg['commands']:
             try:
                 tools.call('run_check', {'name': name})
                 print(f'  merged acceptance: {name} passed', flush=True)
@@ -145,7 +181,7 @@ class Workflow:
         if not clean:
             errors.append('Acceptance checks changed tracked or unignored source files')
         return {'sha': run['merge_sha'], 'checkout': str(checkout), 'fresh_checkout': created,
-                'source_clean': clean, 'passed': not errors and set(tools.checks) == set(self.config['commands']),
+                'source_clean': clean, 'passed': not errors and set(tools.checks) == set(cfg['commands']),
                 'checks': tools.receipts, 'errors': errors}
 
     def advance(self, run, stop_before=None):
@@ -174,6 +210,9 @@ class Workflow:
                     if not run['developer']['passed']:
                         self.repair(run, run['developer'])
                         continue
+                    if not self.has_feature_changes(run):
+                        self.repair(run, self.no_changes(run))
+                        continue
                     run['stage'] = 'qa'
                 elif stage == 'qa':
                     value = self.agent(run, 'qa')
@@ -188,6 +227,10 @@ class Workflow:
                     if self.git('rev-parse', 'HEAD', cwd=cwd) != run['qa_sha'] or self.git('status', '--porcelain', '--untracked-files=normal', cwd=cwd):
                         run['stage'] = 'qa'
                         self.store.save(run)
+                        continue
+                    self.git('fetch', 'origin', self.config['github']['base'])
+                    if not self.git('diff', '--name-only', 'origin/' + self.config['github']['base'] + '...HEAD', cwd=cwd):
+                        self.repair(run, self.no_changes(run))
                         continue
                     self.git('push', '--set-upstream', 'origin', run['branch'], cwd=cwd)
                     body = (f"## {run['key']}\n{self.config['jira']['url']}/browse/{run['key']}\n\n"

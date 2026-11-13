@@ -28,12 +28,20 @@ jobs:
       - name: Validate and export
         if: ${{ hashFiles('game/project.godot') != '' }}
         shell: pwsh
+        env:
+          STORY_HEAD: ${{ github.head_ref }}
         run: |
           $env:GODOT_BIN = (Resolve-Path '.tools/godot/Godot_v4.5.1-stable_win64_console.exe').Path
           $env:GODOT_TEST_BIN = $env:GODOT_BIN
           python -m unittest discover -s tests -p test_scene_contract.py -v
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           python scripts/check_game.py
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          if ($env:STORY_HEAD -like 'codex/kan-9-*') {
+            $featureChecker = (Resolve-Path 'scripts/check_kan9.gd').Path
+            & $env:GODOT_BIN --headless --path game --script $featureChecker
+            if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          }
       - uses: actions/upload-artifact@v4
         if: ${{ hashFiles('game/project.godot') != '' }}
         with:

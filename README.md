@@ -4,7 +4,9 @@ A small Godot 2D demo developed through a sequential local agent harness.
 
 ## Setup on Windows
 
-Run `./scripts/setup.ps1` in PowerShell with Python 3.11+ installed. This pins PyYAML 6.0.3 and setuptools 80.9.0. Git, a signed-in Codex CLI, Ollama with `qwen2.5-coder:7b`, **Godot 4.5.1 stable standard** and matching Windows x86_64 export templates are prerequisites. Set `GODOT_BIN` and `CODEX_BIN` to executable paths if they are absent from PATH.
+Run `./scripts/setup.ps1` in PowerShell with Python 3.11+ installed. This pins PyYAML 6.0.3 and setuptools 80.9.0. Git, a signed-in Codex CLI, **Godot 4.5.1 stable standard** and matching Windows x86_64 export templates are prerequisites. Set `GODOT_BIN` and `CODEX_BIN` to executable paths if they are absent from PATH.
+
+Developer and QA first use the configured Ollama models (`agents.provider: ollama`). If a role returns a failed report or cannot produce usable actions, `agents.fallback: codex` retries that role once with `agents.model: gpt-6.1-sol` and `agents.reasoning_effort: medium`, including the local failure evidence. Successful local roles never invoke Sol. Remove `agents.fallback` to disable escalation. Each role has an independent conversation. Codex proposes structured actions in read-only mode; the host enforces file permissions, executes configured tests and records results. Fallback uses the existing Codex login and account usage. GitHub/Jira credentials remain excluded from model subprocesses.
 
 `python scripts/install_godot.py` downloads checksum-verified official engine and template assets. It installs the engine under `.tools/godot` (auto-detected by the harness) and templates under your user Godot directory. The template archive is large. The installed Codex CLI used during setup was `0.167.0-alpha.4.1`; `doctor` checks its login, and the harness uses `exec --output-schema` and `--ignore-user-config` to avoid loading unrelated integrations.
 
@@ -45,6 +47,10 @@ Edit `harness.yaml` for models, endpoint, deadlines, repair budget, check comman
 Developer and QA have separate conversations. QA can edit only `tests/game/`. Three total repair rounds are shared between QA and Codex findings. Test failures, model errors and exhausted budgets remain visible; there is no silent replacement of the local model with Codex.
 
 The default `ollama.protocol: json_actions` uses schema-constrained executable actions to avoid models describing tool calls as prose. `native` remains available for models with reliable native tool calling. Required checks are executed by the harness after the structured action loop, and failed checks override optimistic model reports. Jira descriptions are flattened to task text so transport metadata does not distract the model. Model claims alone cannot pass validation.
+
+Foundation scaffolding guidance is scoped to KAN-8. Later stories use the current Jira requirements and optional `stories.<key>.guidance`, `commands`, and `check_dependencies` overrides. Checks run in dependency order. KAN-9 adds a real viewport-input test for two identifiable ports, destination feedback, bounded camera, and ship selection. Existing Ocean/Island labels do not satisfy it. Generic startup/export checks are regression checks, not evidence that a new feature was implemented.
+
+Unchanged development results and empty diffs against the PR base return to bounded repair instead of attempting an empty PR (GitHub rejects that with HTTP 422). Existing saved publication-stage runs get the same guard when resumed. A successful model report cannot override an empty feature diff.
 
 `ollama.max_output_tokens` bounds each response (default 2048). Truncated actions are never executed. Logs include Ollama timing/token metrics. A bounded snapshot of existing game files is supplied at role startup; agents can read further files with tools. The `scene` check verifies the title, labeled rectangles and label bounds without claiming human visual observation.
 
