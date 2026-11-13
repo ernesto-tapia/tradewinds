@@ -4,7 +4,7 @@ import os
 from pathlib import Path
 from urllib.parse import urlencode
 
-from .core import REPORT_SCHEMA, command, report, request, run_process
+from .core import REPORT_SCHEMA, command, report, request, run_process, git_command
 
 
 def pages(url, headers, key=None):
@@ -133,13 +133,13 @@ class Codex:
         schema.write_text(json.dumps(REPORT_SCHEMA), encoding='utf-8')
         if output.exists():
             output.unlink()
-        diff = command(['git', 'diff', 'origin/' + self.config['github']['base'] + '...HEAD'] if mode == 'review' else
-                       ['git', 'diff', sha + '^1', sha], worktree)
+        diff = git_command(['diff', 'origin/' + self.config['github']['base'] + '...HEAD'] if mode == 'review' else
+                          ['diff', sha + '^1', sha], worktree)
         feature_diff = None
         if mode == 'assessment' and evidence.get('base_sha') and evidence.get('feature_sha'):
-            feature_diff = command(['git', 'diff', evidence['base_sha'] + '...' + evidence['feature_sha']], worktree)
+            feature_diff = git_command(['diff', evidence['base_sha'] + '...' + evidence['feature_sha']], worktree)
         sources, omitted, remaining = {}, [], 160000
-        tracked = command(['git', 'ls-tree', '-r', '--name-only', sha], worktree).splitlines()
+        tracked = git_command(['ls-tree', '-r', '--name-only', sha], worktree).splitlines()
         for name in tracked:
             if not name.startswith(('game/', 'tests/game/', 'docs/game/')):
                 continue
@@ -147,7 +147,7 @@ class Codex:
                 omitted.append(name)
                 continue
             try:
-                content = command(['git', 'show', sha + ':' + name], worktree)
+                content = git_command(['show', sha + ':' + name], worktree)
                 if len(content) > min(remaining, 40000):
                     omitted.append(name)
                     continue

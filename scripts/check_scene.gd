@@ -39,9 +39,9 @@ func check_scene() -> void:
 		if node is Sprite2D or node is TextureRect or node is Polygon2D or node is AnimatedSprite2D or node is MeshInstance2D:
 			failures.append("Only labeled boxes are allowed; remove " + node.get_class())
 	if rectangles == 0:
-		failures.append("Create at least one labeled ColorRect or Panel for the map/ocean placeholder")
+		failures.append("Create at least one labeled ColorRect or Panel in _ready() at startup for the map/ocean placeholder. Move UI creation out of _process(), which runs every frame.")
 	if not title_found:
-		failures.append("Create a Label displaying Caribbean Tradewinds")
+		failures.append("Create a Label displaying Caribbean Tradewinds in _ready() at startup, not _process()")
 	for failure in failures:
 		push_error("Scene contract: " + failure)
 	if failures.is_empty():

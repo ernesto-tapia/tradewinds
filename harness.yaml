@@ -12,9 +12,10 @@ jira:
 ollama:
   protocol: json_actions
   url: http://localhost:11434
-  developer: llama3.1:8b
-  qa: llama3.1:8b
+  developer: qwen2.5-coder:7b
+  qa: qwen2.5-coder:7b
   context: 8192
+  max_output_tokens: 2048
 limits:
   repairs: 3
   turns: 30
@@ -27,6 +28,10 @@ godot: godot
 godot_version: "4.5.1"
 export_artifact: build/CaribbeanTradewinds.exe
 asset_policy: labeled_boxes
+check_dependencies:
+  scene: [validate]
+  smoke: [validate, scene]
+  export: [validate, scene, smoke]
 permissions:
   developer: ["game/", "docs/game/", "tests/game/"]
   qa: ["tests/game/"]

@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
-from harness.core import Ollama, Store, Tools, command, report, action_call
+from harness.core import Ollama, Store, Tools, command, report, action_call, git_command
 from harness.workflow import Workflow, plain_text
 from harness.integrations import GitHub, Jira
 from harness.core import request
@@ -128,6 +128,15 @@ class HarnessTests(unittest.TestCase):
         tools.call('write_file', {'path': 'tests/game/test.gd', 'content': 'test'})
         self.assertEqual(tools.checks, {})
 
+    def test_identical_write_preserves_checks_across_windows_line_endings(self):
+        (self.root / 'game').mkdir()
+        (self.root / 'game/main.gd').write_bytes(b'extends Control\r\n')
+        tools = Tools(self.root, 'developer', self.cfg, lambda _: None)
+        tools.checks['validate'] = True
+        result = tools.call('write_file', {'path': 'game/main.gd', 'content': 'extends Control\n'})
+        self.assertTrue(result.startswith('unchanged'))
+        self.assertEqual(tools.checks, {'validate': True})
+
     def workflow(self):
         store = Store(self.root / 'state')
         self.addCleanup(store.db.close)
@@ -224,6 +233,15 @@ class HarnessTests(unittest.TestCase):
                 tools.call('run_check', {'name': 'validate'})
         self.assertEqual(tools.checks, {})
 
+    def test_check_prerequisites_prevent_launching_invalid_project(self):
+        self.cfg['commands']['smoke'] = ['fake']
+        self.cfg['check_dependencies'] = {'smoke': ['validate']}
+        tools = Tools(self.root, 'qa', self.cfg, lambda _: None)
+        with patch('harness.core.command') as execute:
+            with self.assertRaisesRegex(RuntimeError, 'validate'):
+                tools.call('run_check', {'name': 'smoke'})
+            execute.assert_not_called()
+
     def test_repair_success_reaches_publication(self):
         workflow, _ = self.workflow()
         run = self.run_data('qa')
@@ -310,6 +328,16 @@ class HarnessTests(unittest.TestCase):
         workflow.commit(self.run_data('qa'))
         self.assertIn('D\tgame/last.txt', command(['git', 'show', '--format=', '--name-status', 'HEAD'], self.root))
 
+    def test_git_ownership_exception_is_per_invocation_and_scoped(self):
+        with patch('harness.core.command', return_value='ok') as execute:
+            git_command(['status', '--short'], self.root)
+        args = execute.call_args.args[0]
+        self.assertEqual(args[:3], ['git', '-c', 'safe.directory=' + self.root.resolve().as_posix()])
+        self.assertNotIn('--global', args)
+        workflow, _ = self.workflow()
+        with self.assertRaises(PermissionError):
+            workflow.git('status', cwd=self.root.parent)
+
     def test_timeout_kills_descendants_holding_output_pipes(self):
         import sys
         import time
@@ -386,6 +414,34 @@ class HarnessTests(unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 action_call(value)
 
+    def test_token_limited_action_is_not_executed(self):
+        prompts = self.root / 'prompts'
+        prompts.mkdir()
+        (prompts / 'developer.md').write_text('develop')
+        self.cfg['ollama'].update(protocol='json_actions', developer='model', max_output_tokens=128)
+        value = {'passed': True, 'summary': 'done', 'evidence': [], 'gaps': []}
+        responses = [
+            {'done_reason': 'length', 'message': {'role': 'assistant', 'content': json.dumps({'action': 'write_file', 'arguments': {'path': 'game/should-not-exist.txt', 'content': 'truncated'}})}},
+            {'message': {'role': 'assistant', 'content': json.dumps({'action': 'finish', 'arguments': {}})}},
+            {'message': {'role': 'assistant', 'content': json.dumps(value)}}]
+        with patch('harness.core.request', side_effect=responses) as req, patch('harness.core.command', side_effect=RuntimeError('missing file')):
+            result = Ollama(self.cfg, prompts).run('developer', {}, Tools(self.root, 'developer', self.cfg, lambda _: None))
+        self.assertFalse((self.root / 'game/should-not-exist.txt').exists())
+        self.assertFalse(result['passed'])
+        self.assertEqual(req.call_args_list[0].args[1]['options']['num_predict'], 128)
+
+    def test_action_budget_failure_returns_report_for_bounded_repair(self):
+        prompts = self.root / 'prompts'
+        prompts.mkdir()
+        (prompts / 'developer.md').write_text('develop')
+        self.cfg['ollama'].update(protocol='json_actions', developer='model')
+        message = {'message': {'role': 'assistant', 'content': json.dumps({'action': 'run_check', 'arguments': {'name': 'validate'}})}}
+        with patch('harness.core.request', return_value=message), patch('harness.core.command', side_effect=RuntimeError('invalid project syntax')):
+            result = Ollama(self.cfg, prompts).run('developer', {}, Tools(self.root, 'developer', self.cfg, lambda _: None))
+        self.assertFalse(result['passed'])
+        self.assertIn('budget exhausted', result['summary'])
+        self.assertEqual(result['gaps'], ['invalid project syntax'])
+
     def test_simple_asset_policy_blocks_image_files(self):
         self.cfg['asset_policy'] = 'labeled_boxes'
         tools = Tools(self.root, 'developer', self.cfg, lambda _: None)
@@ -411,6 +467,19 @@ class HarnessTests(unittest.TestCase):
         value = {'type': 'doc', 'content': [{'type': 'paragraph', 'content': [
             {'type': 'text', 'text': 'Not in scope:'}, {'type': 'text', 'text': ' final art'}]}]}
         self.assertEqual(plain_text(value).strip(), 'Not in scope: final art')
+
+    def test_role_receives_actual_source_without_jira_transport_metadata(self):
+        workflow, _ = self.workflow()
+        run = self.run_data('develop')
+        run['task'] = {'self': 'transport-only', 'fields': {'summary': 'Create skeleton', 'description': 'Only labeled boxes'}}
+        (self.root / 'game').mkdir()
+        (self.root / 'game/main.gd').write_text('extends Control')
+        (self.root / '.env').write_text('secret-hidden')
+        workflow.agent(run, 'developer')
+        task = workflow.ollama.run.call_args.args[1]
+        self.assertEqual(task['existing_files']['game/main.gd'], 'extends Control')
+        self.assertNotIn('transport-only', json.dumps(task))
+        self.assertNotIn('secret-hidden', json.dumps(task))
 
 
 if __name__ == '__main__':

@@ -4,7 +4,7 @@ A small Godot 2D demo developed through a sequential local agent harness.
 
 ## Setup on Windows
 
-Run `./scripts/setup.ps1` in PowerShell with Python 3.11+ installed. This pins PyYAML 6.0.3 and setuptools 80.9.0. Git, a signed-in Codex CLI, Ollama with `llama3.1:8b`, **Godot 4.5.1 stable standard** and matching Windows x86_64 export templates are prerequisites. Set `GODOT_BIN` and `CODEX_BIN` to executable paths if they are absent from PATH.
+Run `./scripts/setup.ps1` in PowerShell with Python 3.11+ installed. This pins PyYAML 6.0.3 and setuptools 80.9.0. Git, a signed-in Codex CLI, Ollama with `qwen2.5-coder:7b`, **Godot 4.5.1 stable standard** and matching Windows x86_64 export templates are prerequisites. Set `GODOT_BIN` and `CODEX_BIN` to executable paths if they are absent from PATH.
 
 `python scripts/install_godot.py` downloads checksum-verified official engine and template assets. It installs the engine under `.tools/godot` (auto-detected by the harness) and templates under your user Godot directory. The template archive is large. The installed Codex CLI used during setup was `0.167.0-alpha.4.1`; `doctor` checks its login, and the harness uses `exec --output-schema` and `--ignore-user-config` to avoid loading unrelated integrations.
 
@@ -45,6 +45,12 @@ Edit `harness.yaml` for models, endpoint, deadlines, repair budget, check comman
 Developer and QA have separate conversations. QA can edit only `tests/game/`. Three total repair rounds are shared between QA and Codex findings. Test failures, model errors and exhausted budgets remain visible; there is no silent replacement of the local model with Codex.
 
 The default `ollama.protocol: json_actions` uses schema-constrained executable actions to avoid models describing tool calls as prose. `native` remains available for models with reliable native tool calling. Required checks are executed by the harness after the structured action loop, and failed checks override optimistic model reports. Jira descriptions are flattened to task text so transport metadata does not distract the model. Model claims alone cannot pass validation.
+
+`ollama.max_output_tokens` bounds each response (default 2048). Truncated actions are never executed. Logs include Ollama timing/token metrics. A bounded snapshot of existing game files is supplied at role startup; agents can read further files with tools. The `scene` check verifies the title, labeled rectangles and label bounds without claiming human visual observation.
+
+The default developer and QA model is now `qwen2.5-coder:7b`, selected after a user-approved local evaluation on KAN-8. Both roles passed validate, scene, smoke, and Windows export, including launching the exported executable headlessly. The earlier `llama3.1:8b` run described calls as text and later struggled with Godot syntax; its history is preserved under `.runs/`. It remains installed, and role models are editable in YAML. No OpenAI model silently replaces a failed Ollama role.
+
+`check_dependencies` prevents running smoke/export against an unvalidated or blank scene. Rewriting identical text preserves check receipts, including across Windows line endings. Action-budget failures return factual failed reports and consume the bounded repair budget. Git ownership trust is scoped to the exact selected workspace per invocation; no global `safe.directory=*` exception is installed.
 
 To retry after correcting a harness/model problem, use `tradewinds resume RUN_ID --retry`. This starts a new bounded cycle in the same worktree, archives the old feedback and repair count in `retry_history`, and preserves all existing logs. It does not increase the global repair limit.
 

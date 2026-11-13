@@ -4,7 +4,7 @@ import re
 import time
 import uuid
 
-from .core import Tools, command
+from .core import Tools, command, git_command
 
 
 def plain_text(value):
@@ -26,7 +26,10 @@ class Workflow:
         self.github, self.jira, self.ollama, self.codex = github, jira, ollama, codex
 
     def git(self, *args, cwd=None):
-        return command(['git', *args], cwd or self.root).strip()
+        directory = Path(cwd or self.root).resolve()
+        if not directory.is_relative_to(self.root):
+            raise PermissionError('Git worktree must remain within the selected workspace')
+        return git_command(list(args), directory).strip()
 
     def start(self, key):
         if not re.fullmatch(r'[A-Z][A-Z0-9_]*-\d+', key):
@@ -88,10 +91,19 @@ class Workflow:
                 print(f"  {role}: {value['check']} passed", flush=True)
         tools = Tools(run['worktree'], role, self.config, log)
         fields = run['task']['fields']
+        files = tools.call('list_files', {})
+        existing, remaining = {}, 8000
+        for name in files:
+            if not name.startswith(('game/', 'docs/game/', 'tests/game/')) or Path(name).suffix not in ('.gd', '.godot', '.tscn', '.cfg', '.md'):
+                continue
+            content = tools.call('read_file', {'path': name})
+            if len(content) <= min(4000, remaining):
+                existing[name] = content
+                remaining -= len(content)
         task = {'issue': {'key': run['key'], 'summary': fields['summary'],
                           'description': plain_text(fields.get('description')).strip()},
                 'feedback': [{k: f[k] for k in ('summary', 'gaps') if k in f} for f in run['feedback'][-1:]],
-                'files': tools.call('list_files', {}), 'configured_checks': list(self.config['commands']),
+                'files': files, 'existing_files': existing, 'configured_checks': list(self.config['commands']),
                 'asset_policy': 'Use only simple rectangles with text labels inside. No generated images, sprites, external art, complex shapes, models or audio.'}
         return self.ollama.run(role, task, tools)
 

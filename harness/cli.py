@@ -7,7 +7,7 @@ import sys
 
 import yaml
 
-from .core import Store, command, request
+from .core import Store, command, request, git_command
 from .integrations import Codex, GitHub, Jira
 from .core import Ollama
 from .workflow import Workflow
@@ -47,7 +47,7 @@ def doctor(root, cfg):
         except Exception as error:
             checks[name] = {'ok': False, 'detail': str(error)}
     check('git', lambda: command(['git', '--version'], root).strip())
-    check('remote', lambda: command(['git', 'ls-remote', 'origin'], root).strip())
+    check('remote', lambda: git_command(['ls-remote', 'origin'], root).strip())
     check('codex_login', lambda: command([cfg['codex'], 'login', 'status'], root).strip())
     def godot():
         version = command([cfg['godot'], '--version'], root).strip()
@@ -82,6 +82,8 @@ def doctor(root, cfg):
         return sorted(cfg['commands'])
     check('configured_commands', commands)
     def limits():
+        if type(cfg['ollama'].get('max_output_tokens', 2048)) is not int or cfg['ollama'].get('max_output_tokens', 2048) <= 0:
+            raise ValueError('ollama.max_output_tokens must be a positive integer')
         for name in ('turns', 'report_attempts', 'command_seconds', 'model_seconds', 'poll_seconds'):
             value = cfg['limits'].get(name, 2 if name == 'report_attempts' else None)
             if type(value) is not int or value <= 0:

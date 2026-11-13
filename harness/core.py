@@ -102,6 +102,13 @@ def command(args, cwd, timeout=180, env=None):
     return result.stdout + result.stderr
 
 
+def git_command(args, cwd, timeout=180):
+    # Trust this explicitly selected workspace for this invocation only. Windows
+    # administrator-created worktrees may otherwise fail ownership checks.
+    directory = Path(cwd).resolve()
+    return command(['git', '-c', 'safe.directory=' + directory.as_posix(), *args], directory, timeout)
+
+
 def report(value):
     if not isinstance(value, dict) or set(value) != {"passed", "summary", "evidence", "gaps"}:
         raise ValueError("Invalid report fields")
@@ -186,13 +193,18 @@ class Tools:
             return self.path(args["path"]).read_text(encoding="utf-8")[:20000]
         if name == "write_file":
             path = self.path(args["path"], True)
+            if path.is_file() and path.read_bytes().replace(b'\r\n', b'\n') == args['content'].encode('utf-8').replace(b'\r\n', b'\n'):
+                return 'unchanged: file already has exactly this content; fixing an error requires different content'
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(args["content"], encoding="utf-8")
+            path.write_text(args["content"], encoding="utf-8", newline='\n')
             self.checks.clear()
             return "written"
         if name == "run_check":
             key = args["name"]
             argv = self.config["commands"][key]
+            missing = [check for check in self.config.get('check_dependencies', {}).get(key, []) if check not in self.checks]
+            if missing:
+                raise RuntimeError('Run required checks successfully first: ' + ', '.join(missing))
             self.checks.pop(key, None)
             (self.root / "build").mkdir(exist_ok=True)
             result = command([s.replace("{godot}", self.config["godot"]).replace('{harness_root}', str(Path(__file__).resolve().parents[1])) for s in argv], self.root,
@@ -252,6 +264,7 @@ class Ollama:
     def run(self, role, task, tools):
         cfg = self.config
         structured = cfg['ollama'].get('protocol') == 'json_actions'
+        tools.log({'role': role, 'model': cfg['ollama'][role], 'protocol': 'json_actions' if structured else 'native'})
         system = (self.prompts / f'{role}.md').read_text(encoding='utf-8')
         if structured:
             system += ('\nRespond with one executable JSON action per turn, never prose or example calls. '
@@ -265,14 +278,21 @@ class Ollama:
                        'Only finish when work is actually complete.\nSchema: ' + json.dumps(ACTION_SCHEMA))
         messages = [{"role": "system", "content": system},
                     {"role": "user", "content": json.dumps(task)}]
+        last_tool_error = None
         for _ in range(cfg["limits"]["turns"]):
             payload = {"model": cfg["ollama"][role], "messages": messages, "stream": False,
-                       "options": {"temperature": 0, "num_ctx": cfg["ollama"]["context"]}}
+                       "options": {"temperature": 0, "num_ctx": cfg["ollama"]["context"],
+                                   "num_predict": cfg['ollama'].get('max_output_tokens', 2048)}}
             payload['format' if structured else 'tools'] = ACTION_SCHEMA if structured else TOOLS
-            message = request(cfg["ollama"]["url"] + "/api/chat", payload,
-                              timeout=cfg["limits"]["model_seconds"])["message"]
+            answer = request(cfg["ollama"]["url"] + "/api/chat", payload,
+                             timeout=cfg["limits"]["model_seconds"])
+            message = answer['message']
             messages.append(message)
-            tools.log({"role": role, "message": message})
+            tools.log({"role": role, "message": message, 'metrics': {k: answer[k] for k in
+                       ('done_reason', 'prompt_eval_count', 'eval_count', 'total_duration') if k in answer}})
+            if answer.get('done_reason') == 'length':
+                messages.append({'role': 'user', 'content': 'Output token budget exceeded. Return one concise complete action. Keep files short; do not repeat code or emit prose.'})
+                continue
             if structured:
                 try:
                     name, args = action_call(json.loads(message['content']))
@@ -292,11 +312,16 @@ class Ollama:
                     result = tools.call(function["name"], function["arguments"])
                 except (KeyError, ValueError, OSError, RuntimeError, subprocess.TimeoutExpired) as error:
                     result = {"error": str(error)}
+                    last_tool_error = str(error)
                 tools.log({'tool': function['name'], 'result': result})
                 messages.append({'role': 'user', 'content': json.dumps({'executed_action': function['name'], 'result': result})} if structured else
                                 {"role": "tool", "tool_name": function["name"], "content": json.dumps(result)})
         else:
-            raise RuntimeError("Agent tool-turn budget exhausted")
+            value = {'passed': False, 'summary': f'{role} tool-turn budget exhausted',
+                     'evidence': [f'{name}: verified exit 0' for name in tools.checks],
+                     'gaps': [last_tool_error or 'Agent did not finish within the configured action budget']}
+            tools.log({'role': role, 'report': value})
+            return value
         check_errors = []
         if structured:
             for name in cfg['commands']:
@@ -313,7 +338,8 @@ class Ollama:
         for attempt in range(cfg['limits'].get('report_attempts', 2)):
             result = request(cfg["ollama"]["url"] + "/api/chat", {
                 "model": cfg["ollama"][role], "messages": messages, "stream": False, "format": REPORT_SCHEMA,
-                "options": {"temperature": 0, "num_ctx": cfg["ollama"]["context"]}},
+                "options": {"temperature": 0, "num_ctx": cfg["ollama"]["context"],
+                            "num_predict": cfg['ollama'].get('max_output_tokens', 2048)}},
                 timeout=cfg["limits"]["model_seconds"])
             tools.log({'role': role, 'raw_report': result['message']['content'], 'attempt': attempt + 1})
             try:
