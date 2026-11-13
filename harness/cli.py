@@ -84,8 +84,8 @@ def doctor(root, cfg):
     def limits():
         if type(cfg['ollama'].get('max_output_tokens', 2048)) is not int or cfg['ollama'].get('max_output_tokens', 2048) <= 0:
             raise ValueError('ollama.max_output_tokens must be a positive integer')
-        for name in ('turns', 'report_attempts', 'command_seconds', 'model_seconds', 'poll_seconds'):
-            value = cfg['limits'].get(name, 2 if name == 'report_attempts' else None)
+        for name in ('turns', 'report_attempts', 'no_progress', 'command_seconds', 'model_seconds', 'poll_seconds'):
+            value = cfg['limits'].get(name, {'report_attempts': 2, 'no_progress': 3}.get(name))
             if type(value) is not int or value <= 0:
                 raise ValueError(f'limits.{name} must be a positive integer')
         if type(cfg['limits']['repairs']) is not int or cfg['limits']['repairs'] < 0:

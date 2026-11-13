@@ -19,6 +19,7 @@ ollama:
 limits:
   repairs: 3
   turns: 30
+  no_progress: 3
   report_attempts: 2
   command_seconds: 180
   model_seconds: 300
@@ -40,3 +41,14 @@ commands:
   scene: ["{godot}", "--headless", "--path", "game", "--script", "{harness_root}/scripts/check_scene.gd"]
   smoke: ["{godot}", "--headless", "--path", "game", "--quit-after", "120"]
   export: ["{godot}", "--headless", "--path", "game", "--export-release", "Windows Desktop", "../build/CaribbeanTradewinds.exe"]
+stories:
+  KAN-8:
+    guidance: prompts/stories/KAN-8.md
+  KAN-9:
+    guidance: prompts/stories/KAN-9.md
+    commands:
+      feature: ["{godot}", "--headless", "--path", "game", "--script", "{harness_root}/scripts/check_kan9.gd"]
+    check_dependencies:
+      feature: [validate, scene]
+      smoke: [validate, scene, feature]
+      export: [validate, scene, feature, smoke]

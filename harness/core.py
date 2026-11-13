@@ -270,7 +270,7 @@ class Ollama:
         self.config, self.prompts = config, Path(prompts)
 
     def run(self, role, task, tools):
-        cfg = self.config
+        cfg = tools.config
         structured = cfg['ollama'].get('protocol') == 'json_actions'
         tools.log({'role': role, 'model': cfg['ollama'][role], 'protocol': 'json_actions' if structured else 'native'})
         system = (self.prompts / f'{role}.md').read_text(encoding='utf-8')
@@ -287,6 +287,13 @@ class Ollama:
         messages = [{"role": "system", "content": system},
                     {"role": "user", "content": json.dumps(task)}]
         last_tool_error = None
+        ineffective_actions = {}
+        rejected_actions = 0
+        def rejected_report(reason):
+            value = {'passed': False, 'summary': f'{role} repeatedly produced unusable actions',
+                     'evidence': [f'{name}: verified exit 0' for name in tools.checks], 'gaps': [reason]}
+            tools.log({'role': role, 'report': value})
+            return value
         for _ in range(cfg["limits"]["turns"]):
             payload = {"model": cfg["ollama"][role], "messages": messages, "stream": False,
                        "options": {"temperature": 0, "num_ctx": cfg["ollama"]["context"],
@@ -299,14 +306,21 @@ class Ollama:
             tools.log({"role": role, "message": message, 'metrics': {k: answer[k] for k in
                        ('done_reason', 'prompt_eval_count', 'eval_count', 'total_duration') if k in answer}})
             if answer.get('done_reason') == 'length':
+                rejected_actions += 1
+                if rejected_actions >= cfg['limits'].get('no_progress', 3):
+                    return rejected_report('Repeated output truncation; no truncated action was executed.')
                 messages.append({'role': 'user', 'content': 'Output token budget exceeded. Return one concise complete action. Keep files short; do not repeat code or emit prose.'})
                 continue
             if structured:
                 try:
                     name, args = action_call(json.loads(message['content']))
                 except (ValueError, TypeError) as error:
+                    rejected_actions += 1
+                    if rejected_actions >= cfg['limits'].get('no_progress', 3):
+                        return rejected_report(f'Repeated invalid actions: {error}')
                     messages.append({'role': 'user', 'content': f'Action rejected: {error}. Return a valid JSON action.'})
                     continue
+                rejected_actions = 0
                 if name == 'finish':
                     break
                 calls = [{'function': {'name': name, 'arguments': args}}]
@@ -322,6 +336,17 @@ class Ollama:
                     result = {"error": str(error)}
                     last_tool_error = str(error)
                 tools.log({'tool': function['name'], 'result': result})
+                if result == 'written':
+                    ineffective_actions.clear()
+                elif (isinstance(result, dict) and 'error' in result) or (isinstance(result, str) and result.startswith('unchanged:')):
+                    signature = json.dumps([function['name'], function['arguments'], result], sort_keys=True)
+                    ineffective_actions[signature] = ineffective_actions.get(signature, 0) + 1
+                    if ineffective_actions[signature] >= cfg['limits'].get('no_progress', 3):
+                        value = {'passed': False, 'summary': f'{role} repeated an ineffective action without source progress',
+                                 'evidence': [f'{name}: verified exit 0' for name in tools.checks],
+                                 'gaps': [last_tool_error or 'The same unchanged file was submitted repeatedly; implement the current feature instead.']}
+                        tools.log({'role': role, 'report': value})
+                        return value
                 messages.append({'role': 'user', 'content': json.dumps({'executed_action': function['name'], 'result': result})} if structured else
                                 {"role": "tool", "tool_name": function["name"], "content": json.dumps(result)})
         else:
