@@ -70,11 +70,12 @@ class Jira:
         if not email or not token:
             raise RuntimeError('Set JIRA_EMAIL and JIRA_API_TOKEN in this terminal')
         self.url = config['jira']['url'].rstrip('/')
+        self.api_url = (os.environ.get('JIRA_API_URL') or config['jira'].get('api_url') or self.url).rstrip('/')
         self.stages = config['jira']['stages']
         self.headers = {'Authorization': 'Basic ' + base64.b64encode(f'{email}:{token}'.encode()).decode()}
 
     def get(self, path):
-        return request(self.url + '/rest/api/3' + path, headers=self.headers)
+        return request(self.api_url + '/rest/api/3' + path, headers=self.headers)
 
     def issue(self, key):
         return self.get(f'/issue/{key}?fields=summary,description,status,issuetype,parent,labels')
@@ -105,7 +106,7 @@ class Jira:
         selected = next((t for t in transitions if t['to']['name'] in desired), None)
         if selected is None:
             raise RuntimeError(f"No configured Jira transition for {stage}; available: {[t['to']['name'] for t in transitions]}")
-        request(self.url + f'/rest/api/3/issue/{key}/transitions', {'transition': {'id': selected['id']}}, self.headers)
+        request(self.api_url + f'/rest/api/3/issue/{key}/transitions', {'transition': {'id': selected['id']}}, self.headers)
 
     def comment(self, key, marker, text):
         start = 0
@@ -117,7 +118,7 @@ class Jira:
             start += len(result['comments'])
             if start >= result['total']:
                 break
-        request(self.url + f'/rest/api/3/issue/{key}/comment', {'body': adf(tag + '\n' + text)}, self.headers)
+        request(self.api_url + f'/rest/api/3/issue/{key}/comment', {'body': adf(tag + '\n' + text)}, self.headers)
 
 
 class Codex:

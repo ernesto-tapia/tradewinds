@@ -52,6 +52,8 @@ Post-merge completion requires a matching reviewed head, successful GitHub check
 
 ## Validation
 
+If authentication fails, run `.\.venv\Scripts\python.exe scripts/check_auth.py` in the terminal containing your tokens. It prints only formatting booleans and HTTP status codes; response bodies and credential values are never displayed. It tests GitHub account and repository access separately, and both direct-site and scoped-token Jira routes. A scoped token needs the Atlassian gateway: if the diagnostic returns `jira_api_url_to_set`, set `$env:JIRA_API_URL` to that URL and rerun `doctor`. Keep `jira.url` as the human-facing site URL. See [Atlassian token routing](https://support.atlassian.com/atlassian-account/docs/manage-api-tokens-for-your-atlassian-account/).
+
 Run `python -m unittest discover -s tests -v`. Integration tests use fixtures and make no network calls. For a live run, `doctor` must pass first. Game setup and export instructions belong in `docs/game/README.md`, created by KAN-8.
 
 `python scripts/smoke_agents.py` optionally tests the real Ollama developer and QA tool loops with a temporary text-file task, without Jira/GitHub writes. Logs go to `.runs/model-smoke.jsonl`.

@@ -52,6 +52,31 @@ class HarnessTests(unittest.TestCase):
             with patch.dict(os.environ, {'CODEX_BIN': 'explicit.exe'}):
                 self.assertEqual(resolve_codex('codex'), 'explicit.exe')
 
+    def test_scoped_jira_route_preserves_site_url(self):
+        import os
+        config = {'jira': {'url': 'https://example.atlassian.net', 'stages': {}}}
+        with patch.dict(os.environ, {'JIRA_EMAIL': 'test@example.test', 'JIRA_API_TOKEN': 'dummy',
+                                    'JIRA_API_URL': 'https://api.atlassian.com/ex/jira/cloud-id'}):
+            jira = Jira(config)
+        with patch('harness.integrations.request', return_value={}) as req:
+            jira.get('/myself')
+        self.assertEqual(jira.url, config['jira']['url'])
+        self.assertEqual(req.call_args.args[0], 'https://api.atlassian.com/ex/jira/cloud-id/rest/api/3/myself')
+
+    def test_auth_diagnostics_do_not_disclose_credentials(self):
+        import importlib.util
+        import os
+        spec = importlib.util.spec_from_file_location('check_auth', Path(__file__).resolve().parents[1] / 'scripts/check_auth.py')
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        cfg = {'github': {'repository': 'owner/repo'}, 'jira': {'url': 'https://example.atlassian.net', 'cloud_id': 'cloud'}}
+        with patch.dict(os.environ, {'GITHUB_TOKEN': 'private-github', 'JIRA_EMAIL': 'private@example.test', 'JIRA_API_TOKEN': 'private-jira'}), patch.object(module, 'probe', side_effect=[200, 404, 401, 200]):
+            result = module.diagnose(cfg)
+        text = json.dumps(result)
+        for secret in ('private-github', 'private-jira', 'private@example.test'):
+            self.assertNotIn(secret, text)
+        self.assertEqual(result['jira_api_url_to_set'], 'https://api.atlassian.com/ex/jira/cloud')
+
     def test_role_permissions_and_traversal(self):
         tools = Tools(self.root, 'qa', self.cfg, lambda _: None)
         for path in ['../outside', 'game/main.gd', '.git/config', 'tests/game/../../../outside']:

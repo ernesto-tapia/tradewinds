@@ -3,6 +3,7 @@ github:
   base: main
 jira:
   url: https://etapm94.atlassian.net
+  cloud_id: cf753471-eeed-4a75-a187-b03675c1e8bc
   jql: 'labels = "caribbean-tradewinds" ORDER BY key ASC'
   stages:
     developing: ["En curso", "In Progress"]
