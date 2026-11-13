@@ -29,4 +29,23 @@ Important Godot 4 API: use .position and .size, NEVER .rect_position or .rect_si
 
 Keep main.tscn to the single Main Control root and its script reference. Create the rectangles and labels programmatically in main.gd _ready(); do not also append extra root nodes to main.tscn. A scene may have only one root. If you use TSCN children instead, each child requires parent="." or its actual parent path; do not combine both approaches. Prefer the minimal root scene plus GDScript UI for this story.
 
+Use this exact project configuration; the first line is NOT a section header and has NO square brackets. Do not add [export] or [scene] sections; exports belong in export_presets.cfg:
+
+```ini
+config_version=5
+
+[application]
+config/name="Caribbean Tradewinds"
+run/main_scene="res://main.tscn"
+
+[display]
+window/size/viewport_width=960
+window/size/viewport_height=640
+
+[rendering]
+renderer/rendering_method="gl_compatibility"
+```
+
+All scene nodes must be created ONCE inside func _ready(), not inside _process(). _process runs every frame; creating nodes there leaks nodes and fails the startup scene check. Put both print() and the labeled-box creation statements in the same _ready() function. Do not add _process() for this static prototype.
+
 Run validate, smoke and export after the final edit. Repair actual Godot errors using read_file/write_file, then rerun checks. Only finish after actual file writes and successful checks. The harness executes missing required checks before requesting the final report. Report real evidence only; failed checks mean passed=false and concrete in-scope gaps.
