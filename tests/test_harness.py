@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
-from harness.core import Ollama, Store, Tools, command, report, action_call, git_command
+from harness.core import Ollama, CodexActions, agent_client, Store, Tools, command, report, action_call, git_command
 from harness.workflow import Workflow, plain_text
 from harness.integrations import GitHub, Jira, Codex
 from harness.core import request
@@ -13,6 +13,44 @@ from harness.cli import resolve_codex
 
 
 class HarnessTests(unittest.TestCase):
+    def test_sol_fallback_only_after_local_failure(self):
+        self.cfg['agents'] = {'provider': 'ollama', 'fallback': 'codex',
+                              'model': 'gpt-6.1-sol', 'reasoning_effort': 'medium'}
+        client = agent_client(self.cfg, self.root)
+        tools = Tools(self.root, 'developer', self.cfg, lambda _: None)
+        passed = {'passed': True, 'summary': 'ok', 'evidence': [], 'gaps': []}
+        failed = {**passed, 'passed': False, 'gaps': ['invalid actions']}
+        with patch.object(client.local, 'run', return_value=passed), patch.object(client.remote, 'run') as remote:
+            self.assertEqual(client.run('developer', {}, tools), passed)
+            remote.assert_not_called()
+        with patch.object(client.local, 'run', return_value=failed), patch.object(client.remote, 'run', return_value=passed) as remote:
+            self.assertEqual(client.run('developer', {}, tools), passed)
+            self.assertEqual(remote.call_args.args[1]['local_failure'], failed)
+            self.assertEqual(remote.call_count, 1)
+        self.assertIs(tools.config, self.cfg)
+
+    def test_codex_actions_use_medium_and_host_permissions(self):
+        self.cfg['agents'] = {'provider': 'codex', 'model': 'gpt-6.1-sol', 'reasoning_effort': 'medium'}
+        self.cfg['codex'] = 'codex'
+        client = agent_client(self.cfg, self.root)
+        self.assertIsInstance(client, CodexActions)
+        tools = Tools(self.root, 'qa', self.cfg, lambda _: None)
+        def generate(argv, **kwargs):
+            output = Path(argv[argv.index('--output-last-message') + 1])
+            output.write_text(json.dumps({'action': 'write_file', 'arguments': {
+                'path': 'game/main.gd', 'content': 'forbidden', 'name': None}}))
+            self.assertEqual(argv[argv.index('--model') + 1], 'gpt-6.1-sol')
+            self.assertIn('model_reasoning_effort="medium"', argv)
+            self.assertEqual(argv[argv.index('--sandbox') + 1], 'read-only')
+            self.assertNotIn('GITHUB_TOKEN', kwargs['env'])
+            return subprocess.CompletedProcess(argv, 0, '', '')
+        from harness.core import ACTION_SCHEMA
+        with patch('harness.core.run_process', side_effect=generate):
+            response = client.chat(self.cfg, 'qa', [], ACTION_SCHEMA, tools)
+        name, args = action_call(json.loads(response['message']['content']))
+        with self.assertRaises(PermissionError):
+            tools.call(name, args)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)

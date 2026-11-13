@@ -4,7 +4,9 @@ A small Godot 2D demo developed through a sequential local agent harness.
 
 ## Setup on Windows
 
-Run `./scripts/setup.ps1` in PowerShell with Python 3.11+ installed. This pins PyYAML 6.0.3 and setuptools 80.9.0. Git, a signed-in Codex CLI, Ollama with `qwen2.5-coder:7b`, **Godot 4.5.1 stable standard** and matching Windows x86_64 export templates are prerequisites. Set `GODOT_BIN` and `CODEX_BIN` to executable paths if they are absent from PATH.
+Run `./scripts/setup.ps1` in PowerShell with Python 3.11+ installed. This pins PyYAML 6.0.3 and setuptools 80.9.0. Git, a signed-in Codex CLI, **Godot 4.5.1 stable standard** and matching Windows x86_64 export templates are prerequisites. Set `GODOT_BIN` and `CODEX_BIN` to executable paths if they are absent from PATH.
+
+Developer and QA first use the configured Ollama models (`agents.provider: ollama`). If a role returns a failed report or cannot produce usable actions, `agents.fallback: codex` retries that role once with `agents.model: gpt-6.1-sol` and `agents.reasoning_effort: medium`, including the local failure evidence. Successful local roles never invoke Sol. Remove `agents.fallback` to disable escalation. Each role has an independent conversation. Codex proposes structured actions in read-only mode; the host enforces file permissions, executes configured tests and records results. Fallback uses the existing Codex login and account usage. GitHub/Jira credentials remain excluded from model subprocesses.
 
 `python scripts/install_godot.py` downloads checksum-verified official engine and template assets. It installs the engine under `.tools/godot` (auto-detected by the harness) and templates under your user Godot directory. The template archive is large. The installed Codex CLI used during setup was `0.167.0-alpha.4.1`; `doctor` checks its login, and the harness uses `exec --output-schema` and `--ignore-user-config` to avoid loading unrelated integrations.
 

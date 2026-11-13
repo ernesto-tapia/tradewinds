@@ -7,6 +7,7 @@ from pathlib import Path
 import sqlite3
 import subprocess
 import time
+import tempfile
 import urllib.request
 import urllib.error
 
@@ -269,10 +270,17 @@ class Ollama:
     def __init__(self, config, prompts):
         self.config, self.prompts = config, Path(prompts)
 
+    def chat(self, cfg, role, messages, schema, tools):
+        return request(cfg['ollama']['url'] + '/api/chat', {
+            'model': cfg['ollama'][role], 'messages': messages, 'stream': False,
+            'format': schema, 'options': {'temperature': 0, 'num_ctx': cfg['ollama']['context'],
+            'num_predict': cfg['ollama'].get('max_output_tokens', 2048)}}, timeout=cfg['limits']['model_seconds'])
+
     def run(self, role, task, tools):
         cfg = tools.config
-        structured = cfg['ollama'].get('protocol') == 'json_actions'
-        tools.log({'role': role, 'model': cfg['ollama'][role], 'protocol': 'json_actions' if structured else 'native'})
+        structured = cfg.get('agents', {}).get('provider') == 'codex' or cfg['ollama'].get('protocol') == 'json_actions'
+        model = cfg['agents']['model'] if cfg.get('agents', {}).get('provider') == 'codex' else cfg['ollama'][role]
+        tools.log({'role': role, 'model': model, 'protocol': 'json_actions' if structured else 'native'})
         system = (self.prompts / f'{role}.md').read_text(encoding='utf-8')
         if structured:
             system += ('\nRespond with one executable JSON action per turn, never prose or example calls. '
@@ -299,8 +307,8 @@ class Ollama:
                        "options": {"temperature": 0, "num_ctx": cfg["ollama"]["context"],
                                    "num_predict": cfg['ollama'].get('max_output_tokens', 2048)}}
             payload['format' if structured else 'tools'] = ACTION_SCHEMA if structured else TOOLS
-            answer = request(cfg["ollama"]["url"] + "/api/chat", payload,
-                             timeout=cfg["limits"]["model_seconds"])
+            answer = self.chat(cfg, role, messages, ACTION_SCHEMA, tools) if structured else request(
+                cfg['ollama']['url'] + '/api/chat', payload, timeout=cfg['limits']['model_seconds'])
             message = answer['message']
             messages.append(message)
             tools.log({"role": role, "message": message, 'metrics': {k: answer[k] for k in
@@ -369,11 +377,7 @@ class Ollama:
             messages.append({'role': 'user', 'content': json.dumps({'verified_checks': tools.checks, 'check_errors': check_errors})})
         messages.append({"role": "user", "content": "Return the final factual report using the report JSON schema, not an action. Gaps are unmet IN-SCOPE requirements only. Excluded work (final art, multiplayer, world simulation) is not a gap. Human visual review happens separately after automated QA. Never claim unexecuted actions or tests. If passed=true, gaps must be the empty array []."})
         for attempt in range(cfg['limits'].get('report_attempts', 2)):
-            result = request(cfg["ollama"]["url"] + "/api/chat", {
-                "model": cfg["ollama"][role], "messages": messages, "stream": False, "format": REPORT_SCHEMA,
-                "options": {"temperature": 0, "num_ctx": cfg["ollama"]["context"],
-                            "num_predict": cfg['ollama'].get('max_output_tokens', 2048)}},
-                timeout=cfg["limits"]["model_seconds"])
+            result = self.chat(cfg, role, messages, REPORT_SCHEMA, tools)
             tools.log({'role': role, 'raw_report': result['message']['content'], 'attempt': attempt + 1})
             try:
                 value = report(json.loads(result["message"]["content"]))
@@ -389,3 +393,72 @@ class Ollama:
                      "gaps": check_errors + [f'Required check not passed: {name}' for name in cfg['commands'] if name not in tools.checks]}
         tools.log({"role": role, "report": value})
         return value
+
+
+class CodexActions(Ollama):
+    """Codex proposes JSON actions; only the host Tools executes them."""
+
+    def chat(self, cfg, role, messages, schema, tools):
+        settings = cfg['agents']
+        action = schema is ACTION_SCHEMA
+        # Structured outputs require a root object and all properties required.
+        # The host's stricter action_call validates the applicable argument set.
+        wire_schema = {'type': 'object', 'additionalProperties': False,
+            'required': ['action', 'arguments'], 'properties': {
+                'action': {'type': 'string', 'enum': ['list_files', 'read_file', 'write_file', 'run_check', 'finish']},
+                'arguments': {'type': 'object', 'additionalProperties': False,
+                    'required': ['path', 'content', 'name'], 'properties': {
+                        key: {'type': ['string', 'null']} for key in ('path', 'content', 'name')}}}} if action else schema
+        with tempfile.TemporaryDirectory(prefix='tradewinds-codex-') as folder:
+            schema_path, output = Path(folder) / 'schema.json', Path(folder) / 'response.json'
+            schema_path.write_text(json.dumps(wire_schema), encoding='utf-8')
+            prompt = ('Act as a model endpoint for the host harness. Do not execute native tools or shell commands. '
+                      'The supplied conversation contains the authoritative task, source and real tool results. '
+                      'Return the next JSON action or final report requested by the last message. '
+                      'For actions use null for unused argument fields.\n' + json.dumps(messages))
+            result = run_process([cfg['codex'], 'exec', '--sandbox', 'read-only', '--ephemeral',
+                '--ignore-user-config', '--model', settings['model'], '-c',
+                'model_reasoning_effort=' + json.dumps(settings['reasoning_effort']),
+                '--output-schema', str(schema_path), '--output-last-message', str(output), '-'],
+                cwd=tools.root, env=clean_env(), input=prompt, timeout=cfg['limits']['model_seconds'])
+            tools.log({'role': role, 'provider': 'codex', 'transcript': result.stdout + result.stderr})
+            if result.returncode or not output.exists():
+                raise RuntimeError('Codex action generation failed; inspect the role transcript')
+            value = json.loads(output.read_text(encoding='utf-8'))
+            if action and isinstance(value.get('arguments'), dict):
+                value['arguments'] = {k: v for k, v in value['arguments'].items() if v is not None}
+            return {'message': {'role': 'assistant', 'content': json.dumps(value)}}
+
+
+def agent_client(config, prompts):
+    provider = config.get('agents', {}).get('provider', 'ollama')
+    if provider not in ('ollama', 'codex'):
+        raise ValueError('agents.provider must be ollama or codex')
+    if provider == 'ollama' and config.get('agents', {}).get('fallback') == 'codex':
+        return FallbackAgents(config, prompts)
+    return (CodexActions if provider == 'codex' else Ollama)(config, prompts)
+
+
+class FallbackAgents:
+    def __init__(self, config, prompts):
+        self.local = Ollama(config, prompts)
+        self.remote = CodexActions(config, prompts)
+
+    def run(self, role, task, tools):
+        try:
+            local_report = self.local.run(role, task, tools)
+        except (RuntimeError, ValueError, OSError, TypeError, subprocess.TimeoutExpired) as error:
+            local_report = {'passed': False, 'summary': 'Local agent failed',
+                            'evidence': [], 'gaps': [str(error)]}
+        if local_report['passed']:
+            return local_report
+        tools.log({'role': role, 'fallback': 'codex', 'local_report': local_report})
+        import copy
+        original = tools.config
+        cfg = copy.deepcopy(original)
+        cfg['agents']['provider'] = 'codex'
+        tools.config = cfg
+        try:
+            return self.remote.run(role, {**task, 'local_failure': local_report}, tools)
+        finally:
+            tools.config = original

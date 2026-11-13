@@ -9,6 +9,11 @@ jira:
     developing: ["En curso", "In Progress"]
     reviewing: ["En revisión", "In Review"]
     done: ["Finalizada", "Listo", "Done", "Hecho"]
+agents:
+  provider: ollama
+  fallback: codex
+  model: gpt-6.1-sol
+  reasoning_effort: medium
 ollama:
   protocol: json_actions
   url: http://localhost:11434

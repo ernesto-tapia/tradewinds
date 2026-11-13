@@ -9,7 +9,7 @@ import yaml
 
 from .core import Store, command, request, git_command
 from .integrations import Codex, GitHub, Jira
-from .core import Ollama
+from .core import agent_client
 from .workflow import Workflow
 
 
@@ -69,7 +69,16 @@ def doctor(root, cfg):
         if not required <= names:
             raise RuntimeError('Missing models: ' + ', '.join(required - names))
         return sorted(names)
-    check('ollama', models)
+    if cfg.get('agents', {}).get('provider', 'ollama') == 'ollama':
+        check('ollama', models)
+    else:
+        def agent_settings():
+            if cfg['agents']['provider'] != 'codex' or not cfg['agents'].get('model'):
+                raise ValueError('Configure agents.provider and agents.model')
+            if cfg['agents'].get('reasoning_effort') not in ('low', 'medium', 'high', 'xhigh'):
+                raise ValueError('Invalid agents.reasoning_effort')
+            return cfg['agents']
+        check('agents', agent_settings)
     check('github', lambda: GitHub(cfg).get('')['full_name'])
     check('jira', lambda: Jira(cfg).get('/myself')['displayName'])
     def commands():
@@ -136,7 +145,7 @@ def main():
             return 0
         with store.lock():
             github, jira = GitHub(cfg), Jira(cfg)
-            workflow = Workflow(root, cfg, store, github, jira, Ollama(cfg, root / 'prompts'),
+            workflow = Workflow(root, cfg, store, github, jira, agent_client(cfg, root / 'prompts'),
                                 Codex(cfg, root / 'prompts', store.root / 'codex'))
             if args.command == 'run':
                 if doctor(root, cfg):
