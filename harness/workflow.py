@@ -7,6 +7,19 @@ import uuid
 from .core import Tools, command
 
 
+def plain_text(value):
+    if isinstance(value, str):
+        return value
+    if not isinstance(value, dict):
+        return ''
+    if value.get('type') == 'text':
+        return value.get('text', '')
+    if value.get('type') == 'hardBreak':
+        return '\n'
+    text = ''.join(plain_text(child) for child in value.get('content', []))
+    return text + ('\n' if value.get('type') in ('paragraph', 'heading', 'listItem') else '')
+
+
 class Workflow:
     def __init__(self, root, config, store, github, jira, ollama, codex):
         self.root, self.config, self.store = Path(root).resolve(), config, store
@@ -44,6 +57,18 @@ class Workflow:
             run['stage'] = 'develop'
         self.store.save(run)
 
+    def retry(self, run):
+        if run['stage'] != 'exhausted':
+            raise ValueError('--retry applies only to an exhausted run')
+        run.setdefault('retry_history', []).append({
+            'repairs': run['repairs'], 'feedback': run['feedback'],
+            'developer': run.get('developer'), 'qa': run.get('qa'), 'review': run.get('review'), 'time': time.time()})
+        run.update(stage='develop', repairs=0, feedback=[])
+        for key in ('developer', 'qa', 'review', 'qa_sha', 'review_sha'):
+            run.pop(key, None)
+        run.pop('error', None)
+        self.store.save(run)
+
     def merge_gap(self, run, pr):
         if not pr.get('merged'):
             return 'PR is not merged'
@@ -54,10 +79,21 @@ class Workflow:
         return None
 
     def agent(self, run, role):
-        log = lambda value: self.store.log(run['id'], role, value)
+        def log(value):
+            self.store.log(run['id'], role, value)
+            if 'tool' in value:
+                failed = isinstance(value['result'], dict) and 'error' in value['result']
+                print(f"  {role}: {value['tool']} {'failed' if failed else 'ok'}", flush=True)
+            elif 'check' in value:
+                print(f"  {role}: {value['check']} passed", flush=True)
         tools = Tools(run['worktree'], role, self.config, log)
-        return self.ollama.run(role, {'issue': run['task'], 'feedback': run['feedback'],
-                                     'files': tools.call('list_files', {})}, tools)
+        fields = run['task']['fields']
+        task = {'issue': {'key': run['key'], 'summary': fields['summary'],
+                          'description': plain_text(fields.get('description')).strip()},
+                'feedback': [{k: f[k] for k in ('summary', 'gaps') if k in f} for f in run['feedback'][-1:]],
+                'files': tools.call('list_files', {}), 'configured_checks': list(self.config['commands']),
+                'asset_policy': 'Use only simple rectangles with text labels inside. No generated images, sprites, external art, complex shapes, models or audio.'}
+        return self.ollama.run(role, task, tools)
 
     def commit(self, run):
         cwd = run['worktree']
@@ -70,11 +106,14 @@ class Workflow:
             self.git('commit', '-m', f"{run['key']}: implement and validate story", cwd=cwd)
         return self.git('rev-parse', 'HEAD', cwd=cwd)
 
-    def advance(self, run):
+    def advance(self, run, stop_before=None):
         try:
             while True:
                 stage, cwd = run['stage'], run['worktree']
                 print(f"{run['id']} {run['key']}: {stage}", flush=True)
+                if stage == stop_before:
+                    self.store.save(run)
+                    return run
                 if stage == 'prepare':
                     self.git('fetch', 'origin', self.config['github']['base'])
                     if not Path(cwd).exists():
@@ -87,8 +126,12 @@ class Workflow:
                     run.setdefault('base_sha', self.git('rev-parse', 'HEAD', cwd=cwd))
                     run['stage'] = 'develop'
                 elif stage == 'develop':
-                    self.jira.transition(run['key'], 'developing')
+                    if self.jira is not None:
+                        self.jira.transition(run['key'], 'developing')
                     run['developer'] = self.agent(run, 'developer')
+                    if not run['developer']['passed']:
+                        self.repair(run, run['developer'])
+                        continue
                     run['stage'] = 'qa'
                 elif stage == 'qa':
                     value = self.agent(run, 'qa')

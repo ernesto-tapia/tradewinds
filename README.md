@@ -44,6 +44,12 @@ Edit `harness.yaml` for models, endpoint, deadlines, repair budget, check comman
 
 Developer and QA have separate conversations. QA can edit only `tests/game/`. Three total repair rounds are shared between QA and Codex findings. Test failures, model errors and exhausted budgets remain visible; there is no silent replacement of the local model with Codex.
 
+The default `ollama.protocol: json_actions` uses schema-constrained executable actions to avoid models describing tool calls as prose. `native` remains available for models with reliable native tool calling. Required checks are executed by the harness after the structured action loop, and failed checks override optimistic model reports. Jira descriptions are flattened to task text so transport metadata does not distract the model. Model claims alone cannot pass validation.
+
+To retry after correcting a harness/model problem, use `tradewinds resume RUN_ID --retry`. This starts a new bounded cycle in the same worktree, archives the old feedback and repair count in `retry_history`, and preserves all existing logs. It does not increase the global repair limit.
+
+All prototype visuals must be simple rectangles with labels inside, using built-in fonts and flat colors. No image generation, downloaded art, sprites, SVGs, complex shapes, models, shaders, animation assets or audio. File tools block common external asset formats when `asset_policy: labeled_boxes` is configured. See `AGENTS.md` and the role prompts.
+
 The harness restricts tool paths and command names, but this is **not an OS security sandbox**: Godot executes project code. Use only your trusted repository and trusted configured checks. Agents cannot edit harness policy or CI through file tools. No arbitrary shell tool is exposed. Codex uses read-only mode and its existing account login.
 
 State lives in ignored `.runs/state.sqlite`; logs and worktrees are under `.runs/`. An exclusive SQLite lock prevents concurrent runs. PR/comment reconciliation uses remote evidence and stable markers, including after a lost HTTP response. Do not manually reuse a run branch for another story. No force push or automatic merge is used.

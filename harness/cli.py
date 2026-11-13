@@ -103,6 +103,7 @@ def main():
     subs.add_parser('run').add_argument('issue')
     resume = subs.add_parser('resume')
     resume.add_argument('run_id')
+    resume.add_argument('--retry', action='store_true', help='Start a fresh bounded repair cycle for an exhausted run, preserving its history and worktree')
     resume.add_argument('--visual-observation', help='Your factual observation after launching the exported build')
     subs.add_parser('watch').add_argument('--once', action='store_true')
     args = parser.parse_args()
@@ -134,6 +135,8 @@ def main():
                 run = workflow.start(args.issue)
             elif args.command == 'resume':
                 run = store.get(args.run_id)
+                if args.retry:
+                    workflow.retry(run)
                 if run['stage'] == 'acceptance_gap':
                     run['stage'] = 'assess'
                 if args.visual_observation:

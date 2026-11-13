@@ -5,8 +5,8 @@ import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
-from harness.core import Ollama, Store, Tools, command, report
-from harness.workflow import Workflow
+from harness.core import Ollama, Store, Tools, command, report, action_call
+from harness.workflow import Workflow, plain_text
 from harness.integrations import GitHub, Jira
 from harness.core import request
 from harness.cli import resolve_codex
@@ -147,7 +147,7 @@ class HarnessTests(unittest.TestCase):
         result = workflow.advance(run)
         self.assertEqual(result['stage'], 'exhausted')
         self.assertEqual(result['repairs'], 3)
-        self.assertEqual(workflow.agent.call_count, 7)  # QA + 3 developer/QA repairs
+        self.assertEqual(workflow.agent.call_count, 4)  # QA failure + 3 failed developer repairs
 
     def test_closed_pr_never_completes(self):
         workflow, _ = self.workflow()
@@ -345,6 +345,72 @@ class HarnessTests(unittest.TestCase):
             github.get = Mock(return_value=state)
             with patch('harness.integrations.pages', return_value=runs):
                 self.assertEqual(github.checks_pass('sha'), expected)
+
+    def test_json_actions_execute_writes_and_automatic_checks(self):
+        prompts = self.root / 'prompts'
+        prompts.mkdir()
+        (prompts / 'developer.md').write_text('develop')
+        self.cfg['ollama']['protocol'] = 'json_actions'
+        self.cfg['ollama']['developer'] = 'model'
+        value = {'passed': True, 'summary': 'written', 'evidence': ['file and check'], 'gaps': []}
+        actions = [dict(action='write_file', arguments={'path': 'game/probe.txt', 'content': 'real content'}),
+                   dict(action='finish', arguments={}), value]
+        responses = [{'message': {'role': 'assistant', 'content': json.dumps(a)}} for a in actions]
+        tools = Tools(self.root, 'developer', self.cfg, lambda _: None)
+        with patch('harness.core.request', side_effect=responses) as req, patch('harness.core.command', return_value=''):
+            result = Ollama(self.cfg, prompts).run('developer', {}, tools)
+        self.assertTrue(result['passed'])
+        self.assertEqual((self.root / 'game/probe.txt').read_text(), 'real content')
+        self.assertEqual(tools.checks, {'validate': True})
+        self.assertNotIn('tools', req.call_args_list[0].args[1])
+        self.assertIn('format', req.call_args_list[0].args[1])
+
+    def test_structured_agent_cannot_pass_failed_real_checks(self):
+        prompts = self.root / 'prompts'
+        prompts.mkdir()
+        (prompts / 'developer.md').write_text('develop')
+        self.cfg['ollama'].update(protocol='json_actions', developer='model')
+        value = {'passed': True, 'summary': 'imagined success', 'evidence': ['not real'], 'gaps': []}
+        responses = [{'message': {'role': 'assistant', 'content': json.dumps(a)}} for a in [
+            {'action': 'finish', 'arguments': {}}, value]]
+        with patch('harness.core.request', side_effect=responses), patch('harness.core.command', side_effect=RuntimeError('no project')):
+            result = Ollama(self.cfg, prompts).run('developer', {}, Tools(self.root, 'developer', self.cfg, lambda _: None))
+        self.assertFalse(result['passed'])
+        self.assertEqual(result['evidence'], [])
+        self.assertIn('validate: no project', result['gaps'])
+
+    def test_action_validation_does_not_accept_prose_or_arbitrary_tools(self):
+        for value in ['example tool call', {'action': 'shell', 'arguments': {}},
+                      {'action': 'finish', 'arguments': {'path': 'unexpected'}},
+                      {'action': 'write_file', 'arguments': {'path': 42, 'content': 'bad'}}]:
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                action_call(value)
+
+    def test_simple_asset_policy_blocks_image_files(self):
+        self.cfg['asset_policy'] = 'labeled_boxes'
+        tools = Tools(self.root, 'developer', self.cfg, lambda _: None)
+        for path in ('game/icon.svg', 'game/ship.PNG', 'game/ship.glb'):
+            with self.assertRaisesRegex(PermissionError, 'Asset policy'):
+                tools.call('write_file', {'path': path, 'content': 'unwanted'})
+        tools.call('write_file', {'path': 'game/main.gd', 'content': 'extends Control'})
+
+    def test_retry_preserves_history_and_worktree(self):
+        workflow, store = self.workflow()
+        run = self.run_data('exhausted')
+        run.update(repairs=3, feedback=[{'summary': 'old failure'}])
+        workflow.retry(run)
+        self.assertEqual(run['stage'], 'develop')
+        self.assertEqual(run['repairs'], 0)
+        self.assertEqual(run['feedback'], [])
+        self.assertEqual(run['retry_history'][0]['feedback'], [{'summary': 'old failure'}])
+        self.assertEqual(store.get('run')['worktree'], str(self.root))
+        with self.assertRaises(ValueError):
+            workflow.retry(run)
+
+    def test_jira_description_normalizes_to_plain_task_text(self):
+        value = {'type': 'doc', 'content': [{'type': 'paragraph', 'content': [
+            {'type': 'text', 'text': 'Not in scope:'}, {'type': 'text', 'text': ' final art'}]}]}
+        self.assertEqual(plain_text(value).strip(), 'Not in scope: final art')
 
 
 if __name__ == '__main__':

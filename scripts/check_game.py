@@ -8,6 +8,7 @@ godot = os.environ.get('GODOT_BIN', 'godot')
 (root / 'build').mkdir(exist_ok=True)
 for args in [
     ['--editor', '--import', '--quit'],
+    ['--script', str(root / 'scripts/check_scene.gd')],
     ['--quit-after', '120'],
     ['--export-release', 'Windows Desktop', '../build/CaribbeanTradewinds.exe'],
 ]:

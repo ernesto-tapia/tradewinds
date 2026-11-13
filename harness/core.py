@@ -172,6 +172,10 @@ class Tools:
             raise PermissionError("Hidden/internal paths are unavailable")
         if write and not any(target.is_relative_to(self.root / p) for p in self.config["permissions"][self.role]):
             raise PermissionError(f"{self.role} cannot write {name}")
+        if write and self.config.get('asset_policy') == 'labeled_boxes' and target.suffix.lower() in {
+                '.png', '.jpg', '.jpeg', '.webp', '.svg', '.gif', '.bmp', '.ico', '.tga', '.tiff',
+                '.psd', '.blend', '.glb', '.gltf', '.fbx', '.obj', '.wav', '.mp3', '.ogg'}:
+            raise PermissionError('Asset policy: use a simple rectangle with an interior text label; no image, model, or audio assets')
         return target
 
     def call(self, name, args):
@@ -191,10 +195,12 @@ class Tools:
             argv = self.config["commands"][key]
             self.checks.pop(key, None)
             (self.root / "build").mkdir(exist_ok=True)
-            result = command([s.replace("{godot}", self.config["godot"]) for s in argv], self.root,
+            result = command([s.replace("{godot}", self.config["godot"]).replace('{harness_root}', str(Path(__file__).resolve().parents[1])) for s in argv], self.root,
                              self.config["limits"]["command_seconds"])
             if any(x in result for x in ("SCRIPT ERROR:", "Parse Error:", "ERROR:")):
-                raise RuntimeError(result[-10000:])
+                lines = result.splitlines()
+                errors = [line for i, line in enumerate(lines) if any('ERROR:' in prior or 'Parse Error:' in prior for prior in lines[max(0, i-2):i+1])]
+                raise RuntimeError('\n'.join(errors)[-4000:])
             if key == 'export' and self.config.get('export_artifact'):
                 artifact = self.path(self.config['export_artifact'])
                 if not artifact.is_file():
@@ -206,7 +212,7 @@ class Tools:
                 result += '\nExported executable smoke test:\n' + smoke
             self.checks[key] = True
             self.log({"check": key, "output": result})
-            return result[-10000:] or "exit 0"
+            return result[-1500:] or "exit 0"
         raise PermissionError("Unknown tool")
 
 
@@ -217,7 +223,26 @@ TOOLS = [{"type": "function", "function": {"name": name, "description": descript
              ("list_files", "List repository files", []),
              ("read_file", "Read a UTF-8 repository file", ["path"]),
              ("write_file", "Write a complete UTF-8 file within role permissions", ["path", "content"]),
-             ("run_check", "Run one configured check: validate, smoke, export", ["name"])]]
+             ("run_check", "Run a configured check by name from the task configured_checks list", ["name"])]]
+
+ACTION_SCHEMA = {'oneOf': [
+    {'type': 'object', 'additionalProperties': False, 'required': ['action', 'arguments'],
+     'properties': {'action': {'type': 'string', 'enum': [name]}, 'arguments': parameters}}
+    for name, parameters in [(t['function']['name'], t['function']['parameters']) for t in TOOLS]
+    + [('finish', {'type': 'object', 'properties': {}, 'required': [], 'additionalProperties': False})]]}
+
+
+def action_call(value):
+    if not isinstance(value, dict) or set(value) != {'action', 'arguments'}:
+        raise ValueError('Return exactly action and arguments')
+    name, args = value['action'], value['arguments']
+    expected = {t['function']['name']: t['function']['parameters']['required'] for t in TOOLS}
+    expected['finish'] = []
+    if not isinstance(name, str) or name not in expected or not isinstance(args, dict):
+        raise ValueError('Unknown action or invalid arguments')
+    if set(args) != set(expected[name]) or not all(isinstance(v, str) for v in args.values()):
+        raise ValueError('Invalid action arguments')
+    return name, args
 
 
 class Ollama:
@@ -226,16 +251,39 @@ class Ollama:
 
     def run(self, role, task, tools):
         cfg = self.config
-        messages = [{"role": "system", "content": (self.prompts / f"{role}.md").read_text()},
+        structured = cfg['ollama'].get('protocol') == 'json_actions'
+        system = (self.prompts / f'{role}.md').read_text(encoding='utf-8')
+        if structured:
+            system += ('\nRespond with one executable JSON action per turn, never prose or example calls. '
+                       'The harness actually executes each action and returns its result. '
+                       'Actions: list_files arguments {}; read_file arguments {"path":"relative/path"}; '
+                       'write_file arguments {"path":"relative/path","content":"complete file text"}; '
+                       'run_check arguments {"name":"configured check name"}; finish arguments {}. '
+                       'Use action and arguments keys. For example: '
+                       '{"action":"read_file","arguments":{"path":"README.md"}}. '
+                       'Use workspace paths starting game/ or docs/game/ when writing game files, never res://. '
+                       'Only finish when work is actually complete.\nSchema: ' + json.dumps(ACTION_SCHEMA))
+        messages = [{"role": "system", "content": system},
                     {"role": "user", "content": json.dumps(task)}]
         for _ in range(cfg["limits"]["turns"]):
             payload = {"model": cfg["ollama"][role], "messages": messages, "stream": False,
-                       "tools": TOOLS, "options": {"temperature": 0, "num_ctx": cfg["ollama"]["context"]}}
+                       "options": {"temperature": 0, "num_ctx": cfg["ollama"]["context"]}}
+            payload['format' if structured else 'tools'] = ACTION_SCHEMA if structured else TOOLS
             message = request(cfg["ollama"]["url"] + "/api/chat", payload,
                               timeout=cfg["limits"]["model_seconds"])["message"]
             messages.append(message)
             tools.log({"role": role, "message": message})
-            calls = message.get("tool_calls", [])
+            if structured:
+                try:
+                    name, args = action_call(json.loads(message['content']))
+                except (ValueError, TypeError) as error:
+                    messages.append({'role': 'user', 'content': f'Action rejected: {error}. Return a valid JSON action.'})
+                    continue
+                if name == 'finish':
+                    break
+                calls = [{'function': {'name': name, 'arguments': args}}]
+            else:
+                calls = message.get("tool_calls", [])
             if not calls:
                 break
             for call in calls:
@@ -245,10 +293,23 @@ class Ollama:
                 except (KeyError, ValueError, OSError, RuntimeError, subprocess.TimeoutExpired) as error:
                     result = {"error": str(error)}
                 tools.log({'tool': function['name'], 'result': result})
-                messages.append({"role": "tool", "tool_name": function["name"], "content": json.dumps(result)})
+                messages.append({'role': 'user', 'content': json.dumps({'executed_action': function['name'], 'result': result})} if structured else
+                                {"role": "tool", "tool_name": function["name"], "content": json.dumps(result)})
         else:
             raise RuntimeError("Agent tool-turn budget exhausted")
-        messages.append({"role": "user", "content": "Return the final factual report using the required JSON schema. Gaps are unmet requirements only. If passed=true, gaps must be the empty array []."})
+        check_errors = []
+        if structured:
+            for name in cfg['commands']:
+                if name in tools.checks:
+                    continue
+                try:
+                    tools.call('run_check', {'name': name})
+                except (KeyError, ValueError, OSError, RuntimeError, subprocess.TimeoutExpired) as error:
+                    check_errors.append(f'{name}: {error}')
+                    tools.log({'required_check': name, 'error': str(error)})
+                    break
+            messages.append({'role': 'user', 'content': json.dumps({'verified_checks': tools.checks, 'check_errors': check_errors})})
+        messages.append({"role": "user", "content": "Return the final factual report using the report JSON schema, not an action. Gaps are unmet IN-SCOPE requirements only. Excluded work (final art, multiplayer, world simulation) is not a gap. Human visual review happens separately after automated QA. Never claim unexecuted actions or tests. If passed=true, gaps must be the empty array []."})
         for attempt in range(cfg['limits'].get('report_attempts', 2)):
             result = request(cfg["ollama"]["url"] + "/api/chat", {
                 "model": cfg["ollama"][role], "messages": messages, "stream": False, "format": REPORT_SCHEMA,
@@ -263,8 +324,9 @@ class Ollama:
                     raise
                 messages.append(result['message'])
                 messages.append({'role': 'user', 'content': f'Invalid report: {error}. Correct the report while preserving the factual outcome. Use passed=false if unmet requirements remain.'})
-        if role == "qa" and value["passed"] and set(tools.checks) != set(cfg["commands"]):
-            value = {"passed": False, "summary": "QA did not execute all required checks after its final edit",
-                     "evidence": value["evidence"], "gaps": ["Run every configured check successfully"]}
+        if (role == 'qa' or structured) and set(tools.checks) != set(cfg['commands']):
+            value = {"passed": False, "summary": f"{role} lacks successful required checks after its final edit",
+                     "evidence": [f'{name}: verified exit 0' for name in tools.checks],
+                     "gaps": check_errors + [f'Required check not passed: {name}' for name in cfg['commands'] if name not in tools.checks]}
         tools.log({"role": role, "report": value})
         return value
