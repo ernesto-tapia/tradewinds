@@ -1,49 +1,77 @@
-extends Control
+extends Node2D
 
-func _ready():
+var destination_feedback: Label
+
+func _ready() -> void:
     print("Caribbean Tradewinds: map ready")
 
-    # Create ColorRect and Label children programmatically
-    var ocean = ColorRect.new()
-    ocean.position = Vector2(100, 100)
-    ocean.size = Vector2(400, 200)
-    ocean.color = Color(0.2, 0.2, 0.2)
-    var ocean_label = Label.new()
-    ocean_label.text = "Ocean"
-    ocean_label.size = ocean.size
-    ocean_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-    ocean_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-    ocean.add_child(ocean_label)
+    var camera = Camera2D.new()
+    camera.name = "MapCamera"
+    camera.position = Vector2(500, 300)
+    camera.limit_left = 0
+    camera.limit_top = 0
+    camera.limit_right = 1000
+    camera.limit_bottom = 600
+    camera.enabled = true
+    var viewport_size = get_viewport_rect().size
+    var fit_scale = minf(viewport_size.x / 1000.0, viewport_size.y / 600.0)
+    camera.zoom = Vector2.ONE * fit_scale
+    add_child(camera)
+    camera.make_current()
 
-    var island = ColorRect.new()
-    island.position = Vector2(550, 100)
-    island.size = Vector2(200, 200)
-    island.color = Color(0.5, 0.5, 0.5)
-    var island_label = Label.new()
-    island_label.text = "Island"
-    island_label.size = island.size
-    island_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-    island_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-    island.add_child(island_label)
+    var ocean = _box("Ocean", Vector2.ZERO, Vector2(1000, 600), Color(0.08, 0.32, 0.48))
+    ocean.mouse_filter = Control.MOUSE_FILTER_IGNORE
+    var island_a = _box("Island A", Vector2(90, 130), Vector2(260, 200), Color(0.3, 0.5, 0.3))
+    island_a.mouse_filter = Control.MOUSE_FILTER_IGNORE
+    var island_b = _box("Island B", Vector2(650, 240), Vector2(260, 200), Color(0.4, 0.5, 0.25))
+    island_b.mouse_filter = Control.MOUSE_FILTER_IGNORE
 
-    var ship = ColorRect.new()
-    ship.position = Vector2(100, 400)
-    ship.size = Vector2(200, 100)
-    ship.color = Color(0.8, 0.8, 0.8)
-    var ship_label = Label.new()
-    ship_label.text = "Ship"
-    ship_label.size = ship.size
-    ship_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-    ship_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-    ship.add_child(ship_label)
+    var port_a = _box("Port A", Vector2(290, 240), Vector2(120, 65), Color(0.55, 0.28, 0.12))
+    var port_b = _box("Port B", Vector2(590, 350), Vector2(120, 65), Color(0.35, 0.2, 0.55))
+    for port in [port_a, port_b]:
+        port.add_to_group("ports")
+        port.set_meta("destination_id", port.name)
+        port.gui_input.connect(_on_port_input.bind(port))
 
-    add_child(ocean)
-    add_child(island)
-    add_child(ship)
+    var ship = _box("Ship", Vector2(450, 420), Vector2(100, 55), Color(0.55, 0.55, 0.55))
+    ship.add_to_group("player_ship")
+    ship.set_meta("selected", false)
+    ship.gui_input.connect(_on_ship_input.bind(ship))
 
-    var title = Label.new()
-    title.text = "Caribbean Tradewinds"
-    title.size = Vector2(400, 50)
-    title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-    title.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-    add_child(title)
+    var title = _box("Caribbean Tradewinds", Vector2(250, 15), Vector2(500, 45), Color(0.1, 0.16, 0.2))
+    title.mouse_filter = Control.MOUSE_FILTER_IGNORE
+    var feedback_box = _box("Destination: click a port", Vector2(250, 520), Vector2(500, 55), Color(0.1, 0.16, 0.2))
+    feedback_box.mouse_filter = Control.MOUSE_FILTER_IGNORE
+    destination_feedback = feedback_box.get_child(0) as Label
+    destination_feedback.add_to_group("destination_feedback")
+
+func _box(text: String, at: Vector2, dimensions: Vector2, tint: Color) -> ColorRect:
+    var box = ColorRect.new()
+    box.name = text
+    box.position = at
+    box.size = dimensions
+    box.color = tint
+    box.mouse_filter = Control.MOUSE_FILTER_STOP
+    var label = Label.new()
+    label.text = text
+    label.position = Vector2.ZERO
+    label.size = dimensions
+    label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+    label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+    label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+    box.add_child(label)
+    add_child(box)
+    return box
+
+func _on_port_input(event: InputEvent, port: Control) -> void:
+    if event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT and event.pressed:
+        var port_id = str(port.get_meta("destination_id"))
+        set_meta("destination_id", port_id)
+        destination_feedback.text = "Destination: " + port_id
+
+func _on_ship_input(event: InputEvent, ship: ColorRect) -> void:
+    if event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT and event.pressed:
+        ship.set_meta("selected", true)
+        ship.color = Color(0.2, 0.6, 0.3)
+        var label = ship.get_child(0) as Label
+        label.text = "Selected Ship"
