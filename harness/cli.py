@@ -38,6 +38,42 @@ def resolve_codex(configured):
     return configured
 
 
+def run_summary(run):
+    """Describe saved state without treating historical reports as current approval."""
+    stage = run['stage']
+    lines = [f"Summary: {run['key']} — {stage.replace('_', ' ')}."]
+    developer = run.get('developer', {})
+    if developer.get('summary'):
+        lines.append('Development: ' + developer['summary'])
+    for key, label in (('qa', 'QA'), ('review', 'Codex review')):
+        value = run.get(key) or {}
+        if value:
+            current = run.get(key + '_sha') == run.get('sha') and bool(run.get('sha'))
+            outcome = ('passed' if value.get('passed') else 'failed') if current else 'previous report; current approval not established'
+            lines.append(f'{label}: {outcome}.')
+    if run.get('pr_url'):
+        lines.append('PR: ' + run['pr_url'])
+    if stage == 'waiting_merge':
+        checks = run.get('checks_pass')
+        lines.append('GitHub checks: ' + ('passed.' if checks is True else 'not confirmed passing; they may be pending, missing, or failed.'))
+        lines.append('Next: inspect the PR checks and launch the game for visual review. Merge manually when satisfied, then resume this run to assess acceptance and update Jira.')
+    elif stage in ('acceptance_gap', 'exhausted'):
+        latest = (run.get('assessment') or {}) if stage == 'acceptance_gap' else ((run.get('feedback') or [{}])[-1])
+        gaps = latest.get('gaps') or []
+        lines.extend('Blocker: ' + gap for gap in gaps)
+        lines.append('Next: resolve the acceptance gaps, then resume.' if stage == 'acceptance_gap' else
+                     'Next: inspect the failure evidence and adjust the model or guidance before using resume --retry.')
+    elif stage == 'done':
+        lines.append('Merged acceptance was confirmed and the Jira completion update finished.')
+    elif stage == 'closed':
+        lines.append('The PR was closed without merging; this run did not complete the Jira story.')
+    else:
+        lines.append('Next: resume this run to continue from its saved stage.')
+    if run.get('error'):
+        lines.append('Error: ' + str(run['error']))
+    return '\n'.join(lines)
+
+
 def doctor(root, cfg):
     checks = {}
     def check(name, function):
@@ -169,6 +205,7 @@ def main():
                 workflow.watch(args.once)
                 return 0
             print(json.dumps(run, indent=2))
+            print('\n' + run_summary(run))
             return 1 if run['stage'] in ('exhausted', 'acceptance_gap') else 0
     except (Exception, KeyboardInterrupt) as error:
         print(f'{type(error).__name__}: {error}', file=sys.stderr)

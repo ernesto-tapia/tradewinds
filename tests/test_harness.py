@@ -9,10 +9,25 @@ from harness.core import Ollama, CodexActions, agent_client, Store, Tools, comma
 from harness.workflow import Workflow, plain_text
 from harness.integrations import GitHub, Jira, Codex
 from harness.core import request
-from harness.cli import resolve_codex
+from harness.cli import resolve_codex, run_summary
 
 
 class HarnessTests(unittest.TestCase):
+    def test_summary_distinguishes_pending_checks_and_stale_qa(self):
+        run = {'key': 'KAN-9', 'stage': 'waiting_merge', 'sha': 'current',
+               'qa': {'passed': True}, 'qa_sha': 'current',
+               'review': {'passed': True}, 'review_sha': 'current', 'checks_pass': False,
+               'pr_url': 'https://example.test/pull/2'}
+        summary = run_summary(run)
+        self.assertIn('QA: passed', summary)
+        self.assertIn('not confirmed passing', summary)
+        self.assertIn('Merge manually', summary)
+        run.update(stage='exhausted', sha='changed', feedback=[{'gaps': ['Godot parse error']}])
+        summary = run_summary(run)
+        self.assertIn('previous report', summary)
+        self.assertNotIn('QA: passed', summary)
+        self.assertIn('Blocker: Godot parse error', summary)
+
     def test_sol_fallback_only_after_local_failure(self):
         self.cfg['agents'] = {'provider': 'ollama', 'fallback': 'codex',
                               'model': 'gpt-6.1-sol', 'reasoning_effort': 'medium'}
