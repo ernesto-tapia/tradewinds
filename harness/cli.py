@@ -38,7 +38,7 @@ def resolve_codex(configured):
     return configured
 
 
-def run_summary(run):
+def run_summary(run, config=None):
     """Describe saved state without treating historical reports as current approval."""
     stage = run['stage']
     lines = [f"Summary: {run['key']} — {stage.replace('_', ' ')}."]
@@ -53,6 +53,14 @@ def run_summary(run):
             lines.append(f'{label}: {outcome}.')
     if run.get('pr_url'):
         lines.append('PR: ' + run['pr_url'])
+    if run.get('worktree') and config and config.get('export_artifact'):
+        build = (Path(run['worktree']) / config['export_artifact']).resolve()
+        if build.is_file():
+            lines.append('Build: ' + build.name)
+            lines.append('Build path: ' + str(build))
+            lines.append("Launch in PowerShell: & '" + str(build).replace("'", "''") + "'")
+        else:
+            lines.append('Build: not available locally. Expected path: ' + str(build))
     if stage == 'waiting_merge':
         checks = run.get('checks_pass')
         lines.append('GitHub checks: ' + ('passed.' if checks is True else 'not confirmed passing; they may be pending, missing, or failed.'))
@@ -205,7 +213,7 @@ def main():
                 workflow.watch(args.once)
                 return 0
             print(json.dumps(run, indent=2))
-            print('\n' + run_summary(run))
+            print('\n' + run_summary(run, cfg))
             return 1 if run['stage'] in ('exhausted', 'acceptance_gap') else 0
     except (Exception, KeyboardInterrupt) as error:
         print(f'{type(error).__name__}: {error}', file=sys.stderr)
