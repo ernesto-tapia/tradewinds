@@ -1,6 +1,9 @@
 extends Node2D
 
 var destination_feedback: Label
+var ship: ColorRect
+var ship_speed = 200
+var current_destination: Control
 
 func _ready() -> void:
     print("Caribbean Tradewinds: map ready")
@@ -33,7 +36,7 @@ func _ready() -> void:
         port.set_meta("destination_id", port.name)
         port.gui_input.connect(_on_port_input.bind(port))
 
-    var ship = _box("Ship", Vector2(450, 420), Vector2(100, 55), Color(0.55, 0.55, 0.55))
+    ship = _box("Ship", Vector2(450, 420), Vector2(100, 55), Color(0.55, 0.55, 0.55))
     ship.add_to_group("player_ship")
     ship.set_meta("selected", false)
     ship.gui_input.connect(_on_ship_input.bind(ship))
@@ -51,7 +54,7 @@ func _box(text: String, at: Vector2, dimensions: Vector2, tint: Color) -> ColorR
     box.position = at
     box.size = dimensions
     box.color = tint
-    box.mouse_filter = Control.MOUSE_FILTER_STOP
+    box.mouse_filter = Control.MOUSE_FILTER_IGNORE
     var label = Label.new()
     label.text = text
     label.position = Vector2.ZERO
@@ -68,6 +71,7 @@ func _on_port_input(event: InputEvent, port: Control) -> void:
         var port_id = str(port.get_meta("destination_id"))
         set_meta("destination_id", port_id)
         destination_feedback.text = "Destination: " + port_id
+        current_destination = port
 
 func _on_ship_input(event: InputEvent, ship: ColorRect) -> void:
     if event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT and event.pressed:
@@ -75,3 +79,14 @@ func _on_ship_input(event: InputEvent, ship: ColorRect) -> void:
         ship.color = Color(0.2, 0.6, 0.3)
         var label = ship.get_child(0) as Label
         label.text = "Selected Ship"
+
+func _process(delta: float) -> void:
+    if current_destination:
+        var ship_position = ship.position
+        var destination_position = current_destination.position
+        var direction = (destination_position - ship_position).normalized()
+        ship_position += direction * ship_speed * delta
+        ship.position = ship_position
+        if ship_position.distance_to(destination_position) < 10:
+            current_destination = null
+            destination_feedback.text = "Docked at: " + str(current_destination.get_meta("destination_id")) if current_destination else "Destination: click a port"
