@@ -114,11 +114,17 @@ func _transaction_input(event: InputEvent, good_id: String, purchasing: bool) ->
 func sail_to(port: Control) -> void:
     if not game_state.start_voyage(str(port.name)):
         return
-    current_destination = port
-    docked_port = null
     voyage_time = game_state.voyage.duration
     set_meta("destination_id", str(port.name))
-    set_meta("at_sea", true)
+    # A zero-distance voyage has already arrived inside start_voyage().
+    if game_state.voyage.active:
+        current_destination = port
+        docked_port = null
+        set_meta("at_sea", true)
+    else:
+        current_destination = null
+        docked_port = get_node(game_state.docked_port_id) as Control
+        set_meta("at_sea", false)
     refresh_voyage()
     refresh_market()
 
