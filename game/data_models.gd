@@ -45,10 +45,24 @@ class Market:
     var port_id: String
     var inventory: Dictionary
     var prices: Dictionary
+    var initial_inventory: Dictionary
+    var base_prices: Dictionary
+    var minimum_prices: Dictionary = {}
+    var maximum_prices: Dictionary = {}
     func _init(location: String, stock: Dictionary, unit_prices: Dictionary) -> void:
         port_id = location
         inventory = stock.duplicate(true)
+        initial_inventory = stock.duplicate(true)
+        base_prices = unit_prices.duplicate(true)
         prices = unit_prices.duplicate(true)
+        for good_id in base_prices:
+            minimum_prices[good_id] = 1
+            maximum_prices[good_id] = int(base_prices[good_id]) * 2
+    # One coin per unit of supply deviation, clamped independently per good.
+    # Recompute from inventory so reaching a bound never creates price drift.
+    func refresh_price(good_id: String) -> void:
+        var supply_delta: int = int(initial_inventory[good_id]) - int(inventory[good_id])
+        prices[good_id] = clampi(int(base_prices[good_id]) + supply_delta, int(minimum_prices[good_id]), int(maximum_prices[good_id]))
 
 class Contract:
     extends RefCounted
@@ -103,7 +117,8 @@ func _init() -> void:
 func can_trade() -> bool:
     return not voyage.active and markets.has(docked_port_id)
 
-# Reject invalid transactions before touching any shared state.
+# The entire batch settles at its displayed pre-trade quote. Only a successful
+# transaction changes stock and the quote for the next transaction.
 func buy(good_id: String, quantity: int) -> bool:
     if not can_trade() or not goods.has(good_id) or quantity <= 0:
         return false
@@ -117,6 +132,7 @@ func buy(good_id: String, quantity: int) -> bool:
     wallet.coins -= quantity * price
     cargo.quantities[good_id] = cargo.quantity(good_id) + quantity
     market.inventory[good_id] = stock - quantity
+    market.refresh_price(good_id)
     return true
 
 func sell(good_id: String, quantity: int) -> bool:
@@ -129,6 +145,7 @@ func sell(good_id: String, quantity: int) -> bool:
     cargo.quantities[good_id] = cargo.quantity(good_id) - quantity
     wallet.coins += quantity * price
     market.inventory[good_id] = int(market.inventory.get(good_id, 0)) + quantity
+    market.refresh_price(good_id)
     return true
 
 func start_voyage(destination_id: String) -> bool:
