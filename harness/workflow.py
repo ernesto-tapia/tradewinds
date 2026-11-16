@@ -85,6 +85,42 @@ class Workflow:
             return 'Merged head checks are missing, pending, or unsuccessful'
         return None
 
+    def pick_up_fix_comment(self, run, pr):
+        settings = self.config['github'].get('comment_commands', {})
+        if settings.get('enabled', True) is False:
+            return False
+        processed = {item['comment_id'] for item in run.get('fix_requests', [])}
+        allowed = {name.lower() for name in settings.get('allowed_users', [])}
+        associations = settings.get('allowed_associations', ['OWNER', 'MEMBER', 'COLLABORATOR'])
+        for comment in sorted(self.github.comments(run['pr']), key=lambda item: item['id']):
+            if comment['id'] in processed or comment.get('user', {}).get('type') == 'Bot':
+                continue
+            login = comment.get('user', {}).get('login', '')
+            if comment.get('author_association') not in associations and login.lower() not in allowed:
+                continue
+            match = re.fullmatch(r'/tradewinds fix[ \t\r\n]+(\S[\s\S]*)', comment.get('body', '').strip())
+            if not match:
+                continue
+            sha = pr['head']['sha']
+            if self.git('status', '--porcelain', cwd=run['worktree']):
+                raise RuntimeError('Resolve local worktree changes before accepting PR repair feedback')
+            if self.git('rev-parse', 'HEAD', cwd=run['worktree']) != sha:
+                self.sync_head(run, sha)
+            feedback = {'passed': False, 'summary': f'PR playtest repair requested by {login}',
+                        'evidence': [comment.get('html_url', f"PR comment {comment['id']}")],
+                        'gaps': [match.group(1).strip()]}
+            run.setdefault('fix_requests', []).append({'comment_id': comment['id'], 'head_sha': sha,
+                'author': login, 'feedback': feedback})
+            run['requested_fix_head'] = sha
+            for key in ('qa', 'qa_sha', 'review', 'review_sha', 'checks_pass', 'visual_observation'):
+                run.pop(key, None)
+            # The request marker and new stage are saved together before any agent
+            # runs, so restart cannot consume the same comment twice.
+            self.repair(run, feedback)
+            print(f"Accepted /tradewinds fix from {login} (comment {comment['id']}).", flush=True)
+            return True
+        return False
+
     def story_config(self, run):
         cfg = copy.deepcopy(self.config)
         story = cfg.get('stories', {}).get(run['key'], {})
@@ -98,7 +134,7 @@ class Workflow:
         return cfg
 
     def has_feature_changes(self, run):
-        base = run.get('base_sha', 'origin/' + self.config['github']['base'])
+        base = run.get('requested_fix_head') or run.get('base_sha', 'origin/' + self.config['github']['base'])
         paths = sorted(set(self.config['permissions']['developer'] + self.config['permissions']['qa']))
         cwd = run['worktree']
         return any((self.git('diff', '--name-only', base + '...HEAD', '--', *paths, cwd=cwd),
@@ -132,6 +168,7 @@ class Workflow:
                 remaining -= len(content)
         task = {'issue': {'key': run['key'], 'summary': fields['summary'],
                           'description': plain_text(fields.get('description')).strip()},
+                'accepted_pr_feedback': [item['feedback'] for item in run.get('fix_requests', [])],
                 'feedback': [{k: f[k] for k in ('summary', 'gaps') if k in f} for f in run['feedback'][-1:]],
                 'files': files, 'existing_files': existing, 'configured_checks': list(cfg['commands']),
                 'asset_policy': 'Use only simple rectangles with text labels inside. No generated images, sprites, external art, complex shapes, models or audio.'}
@@ -221,6 +258,7 @@ class Workflow:
                         self.repair(run, value)
                         continue
                     run['sha'] = self.commit(run)
+                    run.pop('requested_fix_head', None)
                     run['qa_sha'] = run['sha']
                     run['stage'] = 'publish'
                 elif stage == 'publish':
@@ -281,6 +319,8 @@ class Workflow:
                         run['stage'] = 'assess'
                     elif pr['state'] == 'closed':
                         run['stage'] = 'closed'
+                    elif self.pick_up_fix_comment(run, pr):
+                        continue
                     elif pr['head']['sha'] != run.get('review_sha'):
                         self.sync_head(run, pr['head']['sha'])
                         run['stage'] = 'qa'

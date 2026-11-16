@@ -1,6 +1,10 @@
 github:
   repository: ernesto-tapia/tradewinds
   base: main
+  comment_commands:
+    enabled: true
+    allowed_associations: [OWNER, MEMBER, COLLABORATOR]
+    allowed_users: []
 jira:
   url: https://etapm94.atlassian.net
   cloud_id: cf753471-eeed-4a75-a187-b03675c1e8bc

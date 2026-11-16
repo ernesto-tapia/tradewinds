@@ -34,6 +34,20 @@ Use a GitHub fine-grained token restricted to this repository: Contents, Pull re
 
 `watch` runs in the foreground and polls every 60 seconds. It exits automatically when no runs remain in review, waiting for merge, merged assessment, or Jira completion. When a run reaches `done`, it returns to the prompt immediately unless another run still needs monitoring. Closed, exhausted, and acceptance-gap runs also stop being monitored. You can still press Ctrl+C to stop early. Resume after restarting; this is not a background service. Your merge is the only merge authority. A clean review is not a GitHub approval or a substitute for your playtest.
 
+On an open PR, post a **Conversation** comment beginning with this command and including the problem:
+
+```text
+/tradewinds fix
+
+Expected: Selling an item increases gold.
+Actual: The item disappears but gold does not change.
+Steps: Buy an item, then sell it at Port B.
+```
+
+With `watch` running, the next poll sends this feedback through developer repair, QA, and Codex review on the same PR. `resume RUN_ID` also picks it up. Local Ollama runs first, with the configured Sol fallback after local failure. Repository owners, members and collaborators may issue commands; additional GitHub usernames can be configured in `github.comment_commands.allowed_users`. Ordinary comments, bot comments, bare commands without details, and commands on merged or closed PRs do not trigger repair. Only Conversation comments are supported, not inline review comments.
+
+Each comment ID is handled once, even after restart. To request another fix, post a new comment instead of editing a processed one. Repair invalidates previous QA, Codex review and playtest observations, requires source changes, and uses the existing three-round repair budget. If it is exhausted, stop the watcher, inspect the evidence, then explicitly start another cycle with `resume RUN_ID --retry`; the accepted feedback remains attached to the task. Test the new build before merging. The command never merges or starts another story.
+
 After manually launching the exported build, record what you actually observed:
 
 ```powershell

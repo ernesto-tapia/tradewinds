@@ -35,6 +35,9 @@ class GitHub:
     def pr(self, number):
         return self.get(f"/pulls/{number}")
 
+    def comments(self, number):
+        return pages(self.url + f'/issues/{number}/comments', self.headers)
+
     def ensure_pr(self, branch, title, body):
         query = urlencode({"state": "all", "head": self.repo.split('/')[0] + ':' + branch, "base": self.base})
         existing = self.get('/pulls?' + query)

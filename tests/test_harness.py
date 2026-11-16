@@ -234,6 +234,7 @@ class HarnessTests(unittest.TestCase):
         store = Store(self.root / 'state')
         self.addCleanup(store.db.close)
         workflow = Workflow(self.root, self.cfg, store, Mock(), Mock(), Mock(), Mock())
+        workflow.github.comments.return_value = []
         workflow.verify_merged = Mock(return_value={'sha': 'merge', 'passed': True,
             'checks': {'validate': {'command': ['fixture-check'], 'cwd': str(self.root), 'exit_code': 0, 'output': 'verified fixture output'}}, 'errors': []})
         workflow.has_feature_changes = Mock(return_value=True)
@@ -244,6 +245,82 @@ class HarnessTests(unittest.TestCase):
                 'branch': 'codex/kan-8', 'feedback': [], 'repairs': 0, 'task': {},
                 'pr': 1, 'pr_url': 'https://example/pr/1', 'qa_sha': 'abc', 'review_sha': 'abc',
                 'review': {'passed': True}, 'qa': {'passed': True}}
+
+    def fix_comment(self, **overrides):
+        return {'id': 42, 'body': '/tradewinds fix\n\nSelling an item does not increase gold.',
+                'author_association': 'OWNER', 'user': {'login': 'owner', 'type': 'User'}, **overrides}
+
+    def test_fix_comment_persists_once_and_invalidates_approvals(self):
+        workflow, store = self.workflow()
+        run = self.run_data('waiting_merge')
+        run.update(visual_observation='old build passed', checks_pass=True)
+        workflow.git = Mock(side_effect=lambda *args, **kwargs: 'abc' if args[0] == 'rev-parse' else '')
+        workflow.github.comments.return_value = [self.fix_comment()]
+        pr = {'head': {'sha': 'abc'}}
+        self.assertTrue(workflow.pick_up_fix_comment(run, pr))
+        saved = store.get('run')
+        self.assertEqual(saved['stage'], 'develop')
+        self.assertEqual(saved['repairs'], 1)
+        self.assertEqual(saved['requested_fix_head'], 'abc')
+        self.assertIn('Selling an item', saved['feedback'][-1]['gaps'][0])
+        for key in ('qa_sha', 'review_sha', 'qa', 'review', 'visual_observation', 'checks_pass'):
+            self.assertNotIn(key, saved)
+        self.assertFalse(workflow.pick_up_fix_comment(saved, pr))
+        self.assertEqual(store.get('run')['repairs'], 1)
+
+    def test_fix_comments_require_explicit_command_details_and_authorization(self):
+        workflow, _ = self.workflow()
+        workflow.git = Mock()
+        run = self.run_data('waiting_merge')
+        for comment in (
+            self.fix_comment(body='Please fix this'), self.fix_comment(body='/tradewinds fix'),
+            self.fix_comment(body='```\n/tradewinds fix broken\n```'),
+            self.fix_comment(author_association='NONE'),
+            self.fix_comment(user={'login': 'bot', 'type': 'Bot'}),
+        ):
+            workflow.github.comments.return_value = [comment]
+            self.assertFalse(workflow.pick_up_fix_comment(run, {'head': {'sha': 'abc'}}))
+        workflow.git.assert_not_called()
+
+    def test_fix_requires_changes_since_requested_head_not_original_story_base(self):
+        workflow, _ = self.workflow()
+        run = self.run_data('develop')
+        run.update(base_sha='old', requested_fix_head='published')
+        workflow.git = Mock(return_value='')
+        self.assertFalse(Workflow.has_feature_changes(workflow, run))
+        self.assertEqual(workflow.git.call_args_list[0].args[2], 'published...HEAD')
+
+    def test_fix_comment_listing_is_paginated(self):
+        with patch.dict('os.environ', {'GITHUB_TOKEN': 'test-token'}):
+            github = GitHub({'github': {'repository': 'owner/repo', 'base': 'main'}})
+        with patch('harness.integrations.request', side_effect=[
+            [{'id': n} for n in range(100)], [{'id': 101}]
+        ]) as req:
+            self.assertEqual(len(github.comments(2)), 101)
+        self.assertIn('/issues/2/comments?per_page=100&page=2', req.call_args.args[0])
+
+    def test_fix_comment_respects_budget_and_explicit_allowed_user(self):
+        workflow, store = self.workflow()
+        self.cfg['github']['comment_commands'] = {'allowed_users': ['tester']}
+        run = self.run_data('waiting_merge')
+        run['repairs'] = 3
+        workflow.git = Mock(side_effect=lambda *args, **kwargs: 'abc' if args[0] == 'rev-parse' else '')
+        workflow.github.comments.return_value = [self.fix_comment(author_association='NONE', user={'login': 'tester'})]
+        self.assertTrue(workflow.pick_up_fix_comment(run, {'head': {'sha': 'abc'}}))
+        self.assertEqual(store.get('run')['stage'], 'exhausted')
+        self.assertEqual(store.get('run')['repairs'], 3)
+
+    def test_fix_comment_on_open_pr_routes_to_developer_and_closed_pr_does_not(self):
+        for closed in (False, True):
+            workflow, store = self.workflow()
+            run = self.run_data('waiting_merge')
+            workflow.github.pr.return_value = {'merged': False, 'state': 'closed' if closed else 'open', 'head': {'sha': 'abc'}}
+            workflow.github.comments.return_value = [self.fix_comment()]
+            workflow.git = Mock(side_effect=lambda *args, **kwargs: 'abc' if args[0] == 'rev-parse' else '')
+            result = workflow.advance(run, stop_before='develop')
+            self.assertEqual(result['stage'], 'closed' if closed else 'develop')
+            if closed:
+                workflow.github.comments.assert_not_called()
 
     def test_watcher_exits_without_sleep_after_done(self):
         workflow, store = self.workflow()
