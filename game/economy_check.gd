@@ -26,10 +26,10 @@ func _ready() -> void:
     # Independent fixtures exercise transactions without changing the player's game.
     var state = Models.new()
     var before: Dictionary = snapshot(state)
-    if not state.buy("sugar", 1):
+    if state.buy("sugar", 1):
         print("Buying at sea must fail")
         return
-    if not state.sell("sugar", 1):
+    if state.sell("sugar", 1):
         print("Selling at sea must fail")
         return
     if snapshot(state) != before:
