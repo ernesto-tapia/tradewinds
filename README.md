@@ -32,7 +32,7 @@ Use a GitHub fine-grained token restricted to this repository: Contents, Pull re
 .\.venv\Scripts\tradewinds.exe watch
 ```
 
-`watch` runs in the foreground and polls every 60 seconds. It stops when you close the terminal or press Ctrl+C. Resume after restarting; this is not a background service. Your merge is the only merge authority. A clean review is not a GitHub approval or a substitute for your playtest.
+`watch` runs in the foreground and polls every 60 seconds. It exits automatically when no runs remain in review, waiting for merge, merged assessment, or Jira completion. When a run reaches `done`, it returns to the prompt immediately unless another run still needs monitoring. Closed, exhausted, and acceptance-gap runs also stop being monitored. You can still press Ctrl+C to stop early. Resume after restarting; this is not a background service. Your merge is the only merge authority. A clean review is not a GitHub approval or a substitute for your playtest.
 
 After manually launching the exported build, record what you actually observed:
 

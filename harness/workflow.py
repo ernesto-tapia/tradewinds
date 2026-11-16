@@ -358,13 +358,17 @@ class Workflow:
         run.pop('qa_sha', None)
 
     def watch(self, once=False):
+        watched_stages = ('waiting_merge', 'review', 'assess', 'complete')
         while True:
             for run in self.store.all():
-                if run['stage'] in ('waiting_merge', 'review', 'assess', 'complete'):
+                if run['stage'] in watched_stages:
                     try:
                         self.advance(run)
                     except Exception as error:
                         print(f"{run['id']}: {error}", flush=True)
             if once:
+                return
+            if not any(run['stage'] in watched_stages for run in self.store.all()):
+                print('Watcher stopped: no runs remain to monitor.', flush=True)
                 return
             time.sleep(self.config['limits']['poll_seconds'])

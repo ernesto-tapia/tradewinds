@@ -245,6 +245,45 @@ class HarnessTests(unittest.TestCase):
                 'pr': 1, 'pr_url': 'https://example/pr/1', 'qa_sha': 'abc', 'review_sha': 'abc',
                 'review': {'passed': True}, 'qa': {'passed': True}}
 
+    def test_watcher_exits_without_sleep_after_done(self):
+        workflow, store = self.workflow()
+        store.save(self.run_data('waiting_merge'))
+        def finish(run):
+            run['stage'] = 'done'
+            store.save(run)
+        workflow.advance = Mock(side_effect=finish)
+        with patch('harness.workflow.time.sleep') as sleep:
+            workflow.watch()
+        workflow.advance.assert_called_once()
+        sleep.assert_not_called()
+
+    def test_watcher_keeps_polling_while_another_pr_is_pending(self):
+        workflow, store = self.workflow()
+        first = self.run_data('waiting_merge')
+        second = {**first, 'id': 'second'}
+        store.save(first)
+        store.save(second)
+        def advance(run):
+            if run['id'] == 'run' or workflow.advance.call_count >= 3:
+                run['stage'] = 'done'
+                store.save(run)
+        workflow.advance = Mock(side_effect=advance)
+        self.cfg['limits']['poll_seconds'] = 60
+        with patch('harness.workflow.time.sleep') as sleep:
+            workflow.watch()
+        sleep.assert_called_once_with(60)
+        self.assertEqual(workflow.advance.call_count, 3)
+
+    def test_watcher_exits_when_no_runs_need_monitoring(self):
+        workflow, store = self.workflow()
+        for stage in ('done', 'closed', 'exhausted', 'acceptance_gap'):
+            store.save({**self.run_data(stage), 'id': stage})
+        workflow.advance = Mock()
+        with patch('harness.workflow.time.sleep') as sleep:
+            workflow.watch()
+        workflow.advance.assert_not_called()
+        sleep.assert_not_called()
+
     def test_qa_repair_and_exhaustion(self):
         workflow, store = self.workflow()
         run = self.run_data('qa')
