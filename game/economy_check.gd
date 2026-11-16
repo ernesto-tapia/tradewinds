@@ -2,7 +2,7 @@ extends Node
 
 const Models = preload("res://data_models.gd")
 
-# Delegate to the same state and refresh path used by the market controls.
+# Public probes use the same transaction and refresh path as the market controls.
 func check_buy(good_id: String, quantity: int) -> bool:
     return get_parent().buy(good_id, quantity)
 
@@ -22,129 +22,69 @@ func snapshot(state) -> Dictionary:
         "inventories": inventories
     }
 
+func require_condition(value: bool, message: String) -> bool:
+    if not value:
+        push_error("KAN-13 economy: " + message)
+        get_tree().quit(1)
+    return value
+
 func _ready() -> void:
-    # Independent fixtures exercise transactions without changing the player's game.
+    if DisplayServer.get_name() != "headless":
+        return
+    # Independent fixtures leave the player's initial state and voyage checks intact.
     var state = Models.new()
     var before: Dictionary = snapshot(state)
-    if state.buy("sugar", 1):
-        print("Buying at sea must fail")
-        return
-    if state.sell("sugar", 1):
-        print("Selling at sea must fail")
-        return
-    if snapshot(state) != before:
-        print("Rejected trades must preserve state")
+    if not require_condition(not state.buy("sugar", 1) and not state.sell("sugar", 1) and snapshot(state) == before, "at-sea trades must be rejected atomically"):
         return
     state.docked_port_id = "Port A"
-    if not state.buy("sugar", 3):
-        print("Affordable purchase must succeed")
+    if not require_condition(state.can_trade(), "docking must enable trade"):
         return
-    if state.wallet.coins != 85:
-        print("Purchase must deduct exactly once")
+    if not require_condition(state.buy("sugar", 3), "purchase must succeed"):
         return
-    if state.cargo.quantity("sugar") != 3:
-        print("Purchase must add cargo")
+    if not require_condition(state.wallet.coins == 85 and state.cargo.quantity("sugar") == 3 and state.markets["Port A"].inventory["sugar"] == 17, "purchase must deduct cost and update cargo and stock exactly once"):
         return
-    if state.markets["Port A"].inventory["sugar"] != 17:
-        print("Purchase must remove stock")
+    if not require_condition(state.sell("sugar", 2), "sale must succeed"):
         return
-    if not state.sell("sugar", 2):
-        print("Owned cargo must be sellable")
+    if not require_condition(state.wallet.coins == 95 and state.cargo.quantity("sugar") == 1 and state.markets["Port A"].inventory["sugar"] == 19, "sale must credit proceeds and update cargo and stock exactly once"):
         return
-    if state.wallet.coins != 95:
-        print("Sale must credit exactly once")
+    for good_id in ["sugar", "missing"]:
+        for quantity in [-1, 0, 100]:
+            before = snapshot(state)
+            if not require_condition(not state.buy(good_id, quantity) and snapshot(state) == before, "invalid purchase must preserve all balances"):
+                return
+            if not require_condition(not state.sell(good_id, quantity) and snapshot(state) == before, "invalid sale must preserve all balances"):
+                return
+    before = snapshot(state)
+    if not require_condition(not state.buy("coffee", 8) and snapshot(state) == before, "insufficient funds must reject purchase atomically"):
         return
-    if state.cargo.quantity("sugar") != 1:
-        print("Sale must remove cargo")
+    if not require_condition(not state.sell("sugar", 2) and snapshot(state) == before, "overselling must be rejected atomically"):
         return
-    if state.markets["Port A"].inventory["sugar"] != 19:
-        print("Sale must restore stock")
+    state.wallet.coins = 1000
+    if not require_condition(state.buy("rum", 10) and state.buy("coffee", 9) and state.cargo.total() == 20, "mixed cargo must fill shared capacity"):
         return
     before = snapshot(state)
-    if state.sell("sugar", 2):
-        print("Overselling must fail")
+    if not require_condition(not state.buy("sugar", 1) and snapshot(state) == before, "full cargo must reject purchase atomically"):
         return
-    if state.buy("coffee", 8):
-        print("Insufficient funds must block purchase")
+    if not require_condition(state.sell("rum", 1) and state.buy("sugar", 1) and state.cargo.total() == 20, "selling must release reusable cargo capacity"):
         return
-    if state.buy("rum", 11):
-        print("Insufficient stock must block purchase")
-        return
-    for quantity in [0, -1]:
-        if state.buy("sugar", quantity):
-            print("Nonpositive purchase must fail")
-            return
-        if state.sell("sugar", quantity):
-            print("Nonpositive sale must fail")
-            return
-    if state.buy("unknown", 1):
-        print("Unknown goods must fail")
-        return
-    if state.sell("unknown", 1):
-        print("Unknown goods must fail")
-        return
-    if snapshot(state) != before:
-        print("Invalid transactions must be atomic")
-        return
-    state.ship.capacity = 2
-    if not state.buy("rum", 1):
-        print("Mixed cargo may fill remaining capacity")
-        return
-    before = snapshot(state)
-    if state.buy("sugar", 1):
-        print("Full cargo must block purchase")
-        return
-    if snapshot(state) != before:
-        print("Capacity rejection must preserve state")
-        return
-    if not state.sell("rum", 1):
-        print("Selling must release capacity")
-        return
-    if not state.buy("sugar", 1):
-        print("Released capacity must be reusable")
-        return
+    var port_a_stock: Dictionary = state.markets["Port A"].inventory.duplicate(true)
     state.docked_port_id = "Port B"
-    if not state.sell("sugar", 2):
-        print("Cargo must sell at the destination price")
+    var coins: int = state.wallet.coins
+    if not require_condition(state.sell("sugar", 1) and state.wallet.coins == coins + 8 and state.markets["Port B"].inventory["sugar"] == 11, "destination sale must use destination price and stock"):
         return
-    if state.wallet.coins != 106:
-        print("Destination sale must use Port B price")
+    if not require_condition(state.markets["Port A"].inventory == port_a_stock, "trading at B must preserve A stock"):
         return
-    if state.markets["Port B"].inventory["sugar"] != 12:
-        print("Destination stock must increase")
+    state.start_voyage("Port A")
+    before = snapshot(state)
+    if not require_condition(not state.can_trade() and not state.buy("sugar", 1) and not state.sell("rum", 1) and snapshot(state) == before, "voyage must block all transactions atomically"):
         return
-    if state.markets["Port A"].inventory["sugar"] != 18:
-        print("Other port stock must remain independent")
+    state = Models.new()
+    state.docked_port_id = "Port A"
+    if not require_condition(state.buy("sugar", 20), "exact funds, stock and capacity purchase must succeed"):
         return
-    if not state.start_voyage("Port A"):
-        print("Voyage fixture must start")
+    if not require_condition(state.wallet.coins == 0 and state.cargo.total() == 20 and state.markets["Port A"].inventory["sugar"] == 0, "boundary purchase must leave zero coins and stock without negative balances"):
         return
     before = snapshot(state)
-    if state.buy("sugar", 1):
-        print("Voyage must block purchasing")
+    if not require_condition(not state.buy("sugar", 1) and snapshot(state) == before, "purchase beyond exhausted limits must preserve balances"):
         return
-    if state.sell("sugar", 1):
-        print("Voyage must block selling")
-        return
-    if snapshot(state) != before:
-        print("Voyage rejection must preserve state")
-        return
-    var exact = Models.new()
-    exact.docked_port_id = "Port A"
-    if not exact.buy("sugar", 20):
-        print("Exact funds, stock and capacity must be accepted")
-        return
-    if exact.wallet.coins != 0 or exact.cargo.total() != 20:
-        print("Exact boundary must not go negative")
-        return
-    if exact.markets["Port A"].inventory["sugar"] != 0:
-        print("Exact purchase must exhaust stock")
-        return
-    before = snapshot(exact)
-    if exact.buy("sugar", 1):
-        print("Exhausted resources must reject another purchase")
-        return
-    if snapshot(exact) != before:
-        print("Repeated rejected purchase must preserve balances")
-        return
-    print("Economy checks passed: atomic buy/sell, funds, stock, capacity and voyage restrictions")
+    print("KAN-13 economy passed: exact deductions and credits, stock, atomic rejection, mixed capacity, port pricing, voyage restrictions and zero-balance boundaries")
