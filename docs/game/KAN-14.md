@@ -1,16 +1,20 @@
 # KAN-14: deterministic local supply and demand
 
-Implemented inventory-driven prices independently for each port and good. The next quote is the initial price plus initial inventory minus current inventory, clamped between 1 coin and twice the initial price. Buying reduces supply and raises the next quote; selling increases supply and lowers it until a bound is reached. Restoring initial inventory restores the initial price without clamp drift.
+Quotes remain fixed throughout each port visit. Accepted trades update inventory, cargo and coins immediately. Departing for another port recalculates the departing market's quotes from net inventory: initial price plus initial inventory minus current inventory, clamped between 1 coin and twice the initial price. Quotes persist for the next visit. Clicking the current port does not settle prices or end the visit.
 
-Each transaction batch settles at its displayed pre-trade unit price. Only accepted transactions update inventory and subsequent quotes. The existing market rows refresh after trades and display the updated coins per unit. Rejected transactions preserve prices and balances. There is no global simulation or time-driven price change.
+Buying and immediately selling the same quantity during a visit uses the same quote and produces no profit. Each port and good responds independently; there is no global simulation.
 
-Expanded the headless economy probes to verify successive sale proceeds, buying and selling price responses, isolation between ports and goods, both bounds, reversal from saturation, deterministic replay, and atomic rejection including prices. Updated earlier settlement expectations for dynamic quotes.
+Buy all and Sell all controls appear for each good alongside single-unit controls. Buy all respects stock, funds and shared cargo capacity. Sell all sells only the selected good. Controls display bulk quantities, and the market explains departure pricing. Visuals remain labeled flat rectangles.
 
 ## Observed harness results
 
-- validate: Godot 4.5.1 completed project import and script registration.
-- scene: economy probes and labeled rectangle scene contract passed. Godot reported an ObjectDB instances leaked at exit warning.
-- smoke: economy probes passed, including local supply response, deterministic replay and both price bounds. Voyage interaction probes also passed.
-- export: Windows export completed; the exported executable smoke test passed the economy and voyage interaction probes.
+The latest executed checks all passed with Godot 4.5.1:
 
-No manual visual testing was performed. No PR merge or Jira Done transition was performed; human review and merge remain required.
+- validate: project import completed.
+- scene: economy probes and the labeled rectangle scene contract passed. Godot reported an ObjectDB instances leaked at exit warning.
+- smoke: economy probes and viewport voyage interaction probes passed.
+- export: packing completed, and the exported executable smoke test passed both economy and voyage interaction probes. The earlier temporary-file rename failure did not recur in this attempt.
+
+Economy probes verified fixed visit quotes, no same-visit round-trip profit, departure settlement, return visits, local deterministic bounded prices, reversal without drift, bulk limits and atomic rejection. Voyage probes verified viewport clicks through A/B/A/B, midpoint progress, arrival stopping, at-sea trade rejection, docked trading and current-port interaction.
+
+No manual visual playtest was performed. Automated checks do not establish manual visual approval. No PR merge or Jira Done transition was performed; human review and merge remain pending.

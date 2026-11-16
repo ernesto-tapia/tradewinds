@@ -58,11 +58,14 @@ class Market:
         for good_id in base_prices:
             minimum_prices[good_id] = 1
             maximum_prices[good_id] = int(base_prices[good_id]) * 2
-    # One coin per unit of supply deviation, clamped independently per good.
-    # Recompute from inventory so reaching a bound never creates price drift.
+    # Called only on departure. Quotes stay fixed throughout a port visit.
+    # Recompute from net inventory so reversing trades cannot create drift.
     func refresh_price(good_id: String) -> void:
         var supply_delta: int = int(initial_inventory[good_id]) - int(inventory[good_id])
         prices[good_id] = clampi(int(base_prices[good_id]) + supply_delta, int(minimum_prices[good_id]), int(maximum_prices[good_id]))
+    func settle_departure() -> void:
+        for good_id in base_prices:
+            refresh_price(good_id)
 
 class Contract:
     extends RefCounted
@@ -117,8 +120,7 @@ func _init() -> void:
 func can_trade() -> bool:
     return not voyage.active and markets.has(docked_port_id)
 
-# The entire batch settles at its displayed pre-trade quote. Only a successful
-# transaction changes stock and the quote for the next transaction.
+# Inventory, cargo and wallet change immediately; the visit's quote does not.
 func buy(good_id: String, quantity: int) -> bool:
     if not can_trade() or not goods.has(good_id) or quantity <= 0:
         return false
@@ -132,7 +134,6 @@ func buy(good_id: String, quantity: int) -> bool:
     wallet.coins -= quantity * price
     cargo.quantities[good_id] = cargo.quantity(good_id) + quantity
     market.inventory[good_id] = stock - quantity
-    market.refresh_price(good_id)
     return true
 
 func sell(good_id: String, quantity: int) -> bool:
@@ -145,14 +146,35 @@ func sell(good_id: String, quantity: int) -> bool:
     cargo.quantities[good_id] = cargo.quantity(good_id) - quantity
     wallet.coins += quantity * price
     market.inventory[good_id] = int(market.inventory.get(good_id, 0)) + quantity
-    market.refresh_price(good_id)
     return true
+
+# Buy all means the largest affordable batch of this good that fits aboard.
+func max_buy_quantity(good_id: String) -> int:
+    if not can_trade() or not goods.has(good_id):
+        return 0
+    var market: Market = markets[docked_port_id]
+    var price: int = int(market.prices.get(good_id, 0))
+    if price <= 0:
+        return 0
+    return maxi(0, mini(int(market.inventory.get(good_id, 0)), mini(ship.capacity - cargo.total(), int(wallet.coins / price))))
+
+func buy_all(good_id: String) -> bool:
+    return buy(good_id, max_buy_quantity(good_id))
+
+func sell_all(good_id: String) -> bool:
+    return sell(good_id, cargo.quantity(good_id))
 
 func start_voyage(destination_id: String) -> bool:
     if voyage.active or not ports.has(destination_id):
         return false
+    # Clicking the current port is not leaving the island or ending a visit.
+    if destination_id == docked_port_id:
+        return false
     var destination: Port = ports[destination_id]
     voyage.origin_id = docked_port_id
+    if markets.has(docked_port_id):
+        var departing_market: Market = markets[docked_port_id]
+        departing_market.settle_departure()
     voyage.destination_id = destination_id
     voyage.distance = ship.position.distance_to(destination.position)
     voyage.duration = voyage.distance / maxf(ship.speed, 0.001)
