@@ -1,185 +1,190 @@
 extends Node2D
 
-const DataModels = preload("res://data_models.gd")
-var game_state = DataModels.new()
-var destination_feedback: Label
-var trade_feedback: Label
-var economy_feedback: Label
+const Models = preload("res://data_models.gd")
+var game_state = Models.new()
 var ship: ColorRect
-var ship_speed: float = 200.0
-var current_destination: Control
-var docked_port: Control
-var voyage_distance: float = 0.0
+var current_destination: Control = null
+var docked_port: Control = null
 var voyage_time: float = 0.0
 var voyage_progress: float = 0.0
 var remaining_time: float = 0.0
+var destination_feedback: Label
+var trade_feedback: Label
+var economy_feedback: Label
+var market_panel: ColorRect
+var market_title: Label
+var market_rows: Dictionary = {}
+var buy_buttons: Dictionary = {}
+var sell_buttons: Dictionary = {}
 
-func _ready() -> void:
-    print("Caribbean Tradewinds: fixed local state ready")
-    var camera = Camera2D.new()
-    camera.name = "MapCamera"
-    camera.position = Vector2(500, 300)
-    camera.limit_left = 0
-    camera.limit_top = 0
-    camera.limit_right = 1000
-    camera.limit_bottom = 600
-    camera.enabled = true
-    var viewport_size = get_viewport_rect().size
-    var fit_scale = minf(viewport_size.x / 1000.0, viewport_size.y / 600.0)
-    camera.zoom = Vector2.ONE * fit_scale
-    add_child(camera)
-    camera.make_current()
-
-    _box("Ocean", Vector2.ZERO, Vector2(1000, 600), Color(0.08, 0.32, 0.48))
-    _box("Island A", Vector2(90, 130), Vector2(260, 200), Color(0.3, 0.5, 0.3))
-    _box("Island B", Vector2(650, 240), Vector2(260, 200), Color(0.4, 0.5, 0.25))
-    for port_id in ["Port A", "Port B"]:
-        var fixture = game_state.ports[port_id]
-        var port = _box(fixture.id, fixture.position, Vector2(120, 65), Color(0.55, 0.28, 0.12))
-        port.mouse_filter = Control.MOUSE_FILTER_STOP
-        port.add_to_group("ports")
-        port.set_meta("destination_id", fixture.id)
-        port.gui_input.connect(_on_port_input.bind(port))
-
-    ship_speed = game_state.ship.speed
-    ship = _box("Ship", game_state.ship.position, Vector2(100, 55), Color(0.55, 0.55, 0.55))
-    ship.mouse_filter = Control.MOUSE_FILTER_STOP
-    ship.add_to_group("player_ship")
-    ship.set_meta("selected", false)
-    ship.gui_input.connect(_on_ship_input.bind(ship))
-    _box("Caribbean Tradewinds", Vector2(250, 15), Vector2(500, 45), Color(0.1, 0.16, 0.2))
-    var economy_box = _box("Local economy", Vector2(100, 65), Vector2(800, 35), Color(0.1, 0.16, 0.2))
-    economy_feedback = economy_box.get_child(0) as Label
-    var buy_box = _box("Buy 1 Sugar", Vector2(350, 110), Vector2(145, 40), Color(0.1, 0.16, 0.2))
-    var sell_box = _box("Sell 1 Sugar", Vector2(505, 110), Vector2(145, 40), Color(0.1, 0.16, 0.2))
-    buy_box.mouse_filter = Control.MOUSE_FILTER_STOP
-    sell_box.mouse_filter = Control.MOUSE_FILTER_STOP
-    buy_box.gui_input.connect(_on_transaction_input.bind(true))
-    sell_box.gui_input.connect(_on_transaction_input.bind(false))
-    var feedback_box = _box("Destination: click a port", Vector2(200, 520), Vector2(600, 55), Color(0.1, 0.16, 0.2))
-    destination_feedback = feedback_box.get_child(0) as Label
-    destination_feedback.add_to_group("destination_feedback")
-    var trade_box = _box("Trade: dock at a port first", Vector2(250, 465), Vector2(500, 40), Color(0.1, 0.16, 0.2))
-    trade_box.mouse_filter = Control.MOUSE_FILTER_STOP
-    trade_box.gui_input.connect(_on_trade_input)
-    trade_feedback = trade_box.get_child(0) as Label
-    _sync_state()
-
-func _box(text: String, at: Vector2, dimensions: Vector2, tint: Color) -> ColorRect:
-    var box = ColorRect.new()
-    box.name = text
-    box.position = at
-    box.size = dimensions
-    box.color = tint
-    box.mouse_filter = Control.MOUSE_FILTER_IGNORE
-    var label = Label.new()
-    label.text = text
+func box(id: String, at: Vector2, dimensions: Vector2, tint: Color, caption: String, parent: Node = self) -> ColorRect:
+    var control := ColorRect.new()
+    control.name = id
+    control.position = at
+    control.size = dimensions
+    control.color = tint
+    control.mouse_filter = Control.MOUSE_FILTER_IGNORE
+    parent.add_child(control)
+    var label := Label.new()
     label.position = Vector2.ZERO
     label.size = dimensions
     label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
     label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
     label.mouse_filter = Control.MOUSE_FILTER_IGNORE
-    box.add_child(label)
-    add_child(box)
-    return box
+    label.text = caption
+    control.add_child(label)
+    return control
 
-func _on_port_input(event: InputEvent, port: Control) -> void:
-    if event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT and event.pressed:
+func caption(control: Control) -> Label:
+    return control.get_child(0) as Label
+
+func _ready() -> void:
+    box("Ocean", Vector2.ZERO, Vector2(1152, 648), Color("163e58"), "Ocean")
+    box("Title", Vector2(10, 10), Vector2(680, 40), Color("253447"), "Caribbean Tradewinds")
+    box("Island", Vector2(220, 170), Vector2(140, 130), Color("476445"), "Island")
+    box("Island B", Vector2(530, 300), Vector2(150, 120), Color("476445"), "Island")
+    for port_id in game_state.ports:
+        var port := box(port_id, game_state.ports[port_id].position, Vector2(90, 45), Color("815a39"), port_id)
+        port.mouse_filter = Control.MOUSE_FILTER_STOP
+        port.add_to_group("ports")
+        port.set_meta("destination_id", port_id)
+        port.gui_input.connect(_port_input.bind(port))
+    ship = box("Ship", game_state.ship.position, Vector2(70, 35), Color("7c667d"), "Ship")
+    ship.mouse_filter = Control.MOUSE_FILTER_STOP
+    ship.add_to_group("player_ship")
+    ship.set_meta("selected", false)
+    ship.gui_input.connect(_ship_input)
+    destination_feedback = caption(box("Destination", Vector2(10, 65), Vector2(680, 45), Color("253447"), "Choose Port A or Port B to sail"))
+    destination_feedback.add_to_group("destination_feedback")
+    var trade := box("Trade", Vector2(10, 470), Vector2(680, 40), Color("253447"), "Trade unavailable at sea")
+    trade.mouse_filter = Control.MOUSE_FILTER_STOP
+    trade.gui_input.connect(_trade_input)
+    trade_feedback = caption(trade)
+    economy_feedback = caption(box("Economy", Vector2(10, 520), Vector2(680, 90), Color("253447"), "Wallet"))
+    market_panel = box("Market", Vector2(710, 65), Vector2(430, 540), Color("253447"), "Port market")
+    caption(market_panel).vertical_alignment = VERTICAL_ALIGNMENT_TOP
+    market_title = caption(box("MarketTitle", Vector2(10, 35), Vector2(410, 60), Color("35465b"), "Dock to open market", market_panel))
+    var index := 0
+    for good_id in game_state.goods:
+        var y := 110.0 + index * 130.0
+        var row := box("Row_" + good_id, Vector2(10, y), Vector2(410, 55), Color("35465b"), game_state.goods[good_id].name, market_panel)
+        market_rows[good_id] = caption(row)
+        var buy_button := box("Buy_" + good_id, Vector2(10, y + 60), Vector2(195, 40), Color("46604c"), "Buy 1", market_panel)
+        var sell_button := box("Sell_" + good_id, Vector2(225, y + 60), Vector2(195, 40), Color("62523c"), "Sell 1", market_panel)
+        buy_button.mouse_filter = Control.MOUSE_FILTER_STOP
+        sell_button.mouse_filter = Control.MOUSE_FILTER_STOP
+        buy_button.gui_input.connect(_transaction_input.bind(good_id, true))
+        sell_button.gui_input.connect(_transaction_input.bind(good_id, false))
+        buy_buttons[good_id] = buy_button
+        sell_buttons[good_id] = sell_button
+        index += 1
+    var camera := Camera2D.new()
+    camera.position = Vector2(576, 324)
+    camera.limit_left = 0
+    camera.limit_top = 0
+    camera.limit_right = 1152
+    camera.limit_bottom = 648
+    camera.position_smoothing_enabled = false
+    add_child(camera)
+    set_meta("at_sea", true)
+    refresh_market()
+
+func pressed(event: InputEvent) -> bool:
+    return event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT and event.pressed
+
+func _port_input(event: InputEvent, port: Control) -> void:
+    if pressed(event):
         sail_to(port)
 
+func _ship_input(event: InputEvent) -> void:
+    if pressed(event):
+        ship.set_meta("selected", true)
+        ship.color = Color("b68a43")
+        caption(ship).text = "Ship selected"
+
+func _trade_input(event: InputEvent) -> void:
+    if pressed(event):
+        request_trade()
+
+func _transaction_input(event: InputEvent, good_id: String, purchasing: bool) -> void:
+    if pressed(event):
+        var accepted: bool = buy(good_id, 1) if purchasing else sell(good_id, 1)
+        trade_feedback.text = "Trade permitted: transaction completed" if accepted else "Trade unavailable: check stock, coins, cargo and docking"
+
 func sail_to(port: Control) -> void:
-    if port == null or not port.is_in_group("ports") or current_destination != null:
-        return
-    game_state.ship.speed = ship_speed
-    if not game_state.start_voyage(str(port.get_meta("destination_id"))):
+    if not game_state.start_voyage(str(port.name)):
         return
     current_destination = port
     docked_port = null
-    set_meta("destination_id", str(port.get_meta("destination_id")))
-    _sync_voyage()
-    trade_feedback.text = "Trade unavailable: at sea"
-    if not game_state.voyage.active:
-        _dock()
-    else:
-        _update_voyage_feedback()
-        _sync_state()
-
-func _on_ship_input(event: InputEvent, selected_ship: ColorRect) -> void:
-    if event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT and event.pressed:
-        selected_ship.set_meta("selected", true)
-        selected_ship.color = Color(0.2, 0.6, 0.3)
-        var label = selected_ship.get_child(0) as Label
-        label.text = "Selected Ship"
+    voyage_time = game_state.voyage.duration
+    set_meta("destination_id", str(port.name))
+    set_meta("at_sea", true)
+    refresh_voyage()
+    refresh_market()
 
 func _process(delta: float) -> void:
-    if current_destination == null:
-        return
-    game_state.ship.speed = ship_speed
-    game_state.advance_voyage(delta)
-    _sync_voyage()
-    if not game_state.voyage.active:
-        _dock()
-    else:
-        _update_voyage_feedback()
+    if game_state.voyage.active:
+        game_state.advance_voyage(delta)
+        refresh_voyage()
+        if not game_state.voyage.active:
+            docked_port = get_node(game_state.docked_port_id) as Control
+            current_destination = null
+            set_meta("at_sea", false)
+            refresh_market()
 
-func _sync_voyage() -> void:
+func refresh_voyage() -> void:
     ship.position = game_state.ship.position
-    voyage_distance = game_state.voyage.distance
-    voyage_time = game_state.voyage.duration
     voyage_progress = game_state.voyage.progress
     remaining_time = game_state.voyage.remaining_time
-
-func _update_voyage_feedback() -> void:
-    destination_feedback.text = "Destination: %s | %.0f%% | %.1f s remaining" % [game_state.voyage.destination_id, voyage_progress * 100.0, remaining_time]
-
-func _dock() -> void:
-    docked_port = current_destination
-    current_destination = null
-    _sync_voyage()
-    var port_id: String = game_state.docked_port_id
-    destination_feedback.text = "Docked at: %s | 100%% | click a port to sail" % port_id
-    trade_feedback.text = "Trade available at %s: click to check" % port_id
-    _sync_state()
+    if game_state.voyage.active:
+        destination_feedback.text = "Sailing to %s: %d%% | %.1f seconds remaining" % [game_state.voyage.destination_id, roundi(voyage_progress * 100.0), remaining_time]
+    else:
+        destination_feedback.text = "Docked at %s: 100%% | 0 seconds remaining" % game_state.docked_port_id
 
 func can_trade() -> bool:
     return game_state.can_trade()
 
 func request_trade() -> bool:
-    if not can_trade():
-        trade_feedback.text = "Trade unavailable: dock at a port first"
-        return false
-    trade_feedback.text = "Trade permitted at %s" % game_state.docked_port_id
-    return true
+    trade_feedback.text = "Trade permitted at " + game_state.docked_port_id if can_trade() else "Trade unavailable at sea"
+    return can_trade()
 
 func buy(good_id: String, quantity: int) -> bool:
-    var success: bool = game_state.buy(good_id, quantity)
-    trade_feedback.text = "Bought %d %s" % [quantity, good_id] if success else "Buy unavailable: check dock, coins, stock and capacity"
-    _sync_state()
-    return success
+    var accepted: bool = game_state.buy(good_id, quantity)
+    refresh_market()
+    return accepted
 
 func sell(good_id: String, quantity: int) -> bool:
-    var success: bool = game_state.sell(good_id, quantity)
-    trade_feedback.text = "Sold %d %s" % [quantity, good_id] if success else "Sell unavailable: check dock and cargo"
-    _sync_state()
-    return success
+    var accepted: bool = game_state.sell(good_id, quantity)
+    refresh_market()
+    return accepted
 
-func _on_transaction_input(event: InputEvent, buying: bool) -> void:
-    if event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT and event.pressed:
-        if buying:
-            buy("sugar", 1)
-        else:
-            sell("sugar", 1)
+func get_market_data(port_id: String) -> Dictionary:
+    if not game_state.markets.has(port_id):
+        return {}
+    var market = game_state.markets[port_id]
+    return {"port_id": port_id, "inventory": market.inventory.duplicate(true), "prices": market.prices.duplicate(true), "wallet_coins": game_state.wallet.coins}
 
-func _on_trade_input(event: InputEvent) -> void:
-    if event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT and event.pressed:
-        request_trade()
-
-func _sync_state() -> void:
-    set_meta("at_sea", not game_state.can_trade())
-    set_meta("can_trade", can_trade())
-    set_meta("docked_port_id", game_state.docked_port_id)
-    var market_text: String = "Market: dock to trade"
-    if can_trade():
-        var market = game_state.markets[game_state.docked_port_id]
-        market_text = "%s Sugar: %d coins, %d stock" % [market.port_id, market.prices["sugar"], market.inventory["sugar"]]
-    economy_feedback.text = "Coins: %d | Cargo: %d/%d (Sugar %d) | %s" % [game_state.wallet.coins, game_state.cargo.total(), game_state.ship.capacity, game_state.cargo.quantity("sugar"), market_text]
+func refresh_market() -> void:
+    if not is_instance_valid(market_panel):
+        return
+    var cargo_text := ""
+    for good_id in game_state.goods:
+        cargo_text += "%s %d  " % [game_state.goods[good_id].name, game_state.cargo.quantity(good_id)]
+    economy_feedback.text = "Coins: %d | Cargo: %d/%d\n%s" % [game_state.wallet.coins, game_state.cargo.total(), game_state.ship.capacity, cargo_text]
+    market_panel.visible = can_trade()
+    if not can_trade():
+        trade_feedback.text = "Trade unavailable at sea"
+        return
+    market_title.text = "%s market | Wallet: %d coins\nGood | Stock | Unit price | Owned" % [game_state.docked_port_id, game_state.wallet.coins]
+    var market = game_state.markets[game_state.docked_port_id]
+    for good_id in market_rows:
+        var stock: int = int(market.inventory.get(good_id, 0))
+        var price: int = int(market.prices.get(good_id, 0))
+        var owned: int = game_state.cargo.quantity(good_id)
+        market_rows[good_id].text = "%s | Stock %d | %d coins/unit | Owned %d" % [game_state.goods[good_id].name, stock, price, owned]
+        var can_buy: bool = price > 0 and stock > 0 and game_state.wallet.coins >= price and game_state.cargo.total() < game_state.ship.capacity
+        buy_buttons[good_id].color = Color("46604c") if can_buy else Color("444444")
+        sell_buttons[good_id].color = Color("62523c") if owned > 0 else Color("444444")
+        caption(buy_buttons[good_id]).text = "Buy 1" if can_buy else "Buy 1 unavailable"
+        caption(sell_buttons[good_id]).text = "Sell 1" if owned > 0 else "Sell 1 unavailable"
+    trade_feedback.text = "Trade permitted at " + game_state.docked_port_id

@@ -86,11 +86,12 @@ func _init() -> void:
     }
     goods = {
         "sugar": Good.new("sugar", "Sugar"),
-        "rum": Good.new("rum", "Rum")
+        "rum": Good.new("rum", "Rum"),
+        "coffee": Good.new("coffee", "Coffee")
     }
     markets = {
-        "Port A": Market.new("Port A", {"sugar": 20, "rum": 10}, {"sugar": 5, "rum": 10}),
-        "Port B": Market.new("Port B", {"sugar": 10, "rum": 20}, {"sugar": 8, "rum": 7})
+        "Port A": Market.new("Port A", {"sugar": 20, "rum": 10, "coffee": 15}, {"sugar": 5, "rum": 10, "coffee": 12}),
+        "Port B": Market.new("Port B", {"sugar": 10, "rum": 20, "coffee": 8}, {"sugar": 8, "rum": 7, "coffee": 18})
     }
     ship = Ship.new()
     cargo = ship.cargo
