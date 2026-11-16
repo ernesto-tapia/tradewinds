@@ -66,7 +66,7 @@ func _ready() -> void:
     market_panel = box("Market", Vector2(710, 65), Vector2(430, 540), Color("253447"), "Port market")
     caption(market_panel).vertical_alignment = VERTICAL_ALIGNMENT_TOP
     market_title = caption(box("MarketTitle", Vector2(10, 35), Vector2(410, 60), Color("35465b"), "Dock to open market", market_panel))
-    caption(box("PricePolicy", Vector2(10, 495), Vector2(410, 35), Color("35465b"), "Quotes fixed this visit; update on departure", market_panel))
+    caption(box("PricePolicy", Vector2(10, 495), Vector2(410, 35), Color("35465b"), "Prices update per unit; bulk totals shown", market_panel))
     var index := 0
     for good_id in game_state.goods:
         var y := 105.0 + index * 130.0
@@ -215,15 +215,18 @@ func refresh_market() -> void:
     for good_id in market_rows:
         var stock: int = int(market.inventory.get(good_id, 0))
         var price: int = int(market.prices.get(good_id, 0))
+        var sell_price: int = market.trade_total(good_id, 1, false)
         var owned: int = game_state.cargo.quantity(good_id)
-        market_rows[good_id].text = "%s | Stock %d | %d coins/unit | Owned %d" % [game_state.goods[good_id].name, stock, price, owned]
+        market_rows[good_id].text = "%s | Stock %d | Owned %d\nNext unit: Buy %d / Sell %d coins" % [game_state.goods[good_id].name, stock, owned, price, sell_price]
         var maximum: int = game_state.max_buy_quantity(good_id)
+        var buy_total: int = market.trade_total(good_id, maximum, true)
+        var sell_total: int = market.trade_total(good_id, owned, false)
         buy_buttons[good_id].color = Color("46604c") if maximum > 0 else Color("444444")
         buy_all_buttons[good_id].color = buy_buttons[good_id].color
         sell_buttons[good_id].color = Color("62523c") if owned > 0 else Color("444444")
         sell_all_buttons[good_id].color = sell_buttons[good_id].color
-        caption(buy_buttons[good_id]).text = "Buy 1" if maximum > 0 else "Buy 1\nunavailable"
-        caption(sell_buttons[good_id]).text = "Sell 1" if owned > 0 else "Sell 1\nunavailable"
-        caption(buy_all_buttons[good_id]).text = "Buy all\n(%d)" % maximum
-        caption(sell_all_buttons[good_id]).text = "Sell all\n(%d)" % owned
+        caption(buy_buttons[good_id]).text = "Buy 1\n%d coins" % price if maximum > 0 else "Buy 1\nunavailable"
+        caption(sell_buttons[good_id]).text = "Sell 1\n%d coins" % sell_price if owned > 0 else "Sell 1\nunavailable"
+        caption(buy_all_buttons[good_id]).text = "Buy all (%d)\n%d coins" % [maximum, buy_total]
+        caption(sell_all_buttons[good_id]).text = "Sell all (%d)\n%d coins" % [owned, sell_total]
     trade_feedback.text = "Trade permitted at " + game_state.docked_port_id
