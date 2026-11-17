@@ -147,13 +147,21 @@ class Workflow:
                 'gaps': ['Implement the current Jira story. An unchanged existing project is not a completed feature and cannot produce a PR.']}
 
     def agent(self, run, role):
+        active_model = None
         def log(value):
+            nonlocal active_model
             self.store.log(run['id'], role, value)
+            if 'model' in value:
+                active_model = value['model']
+                print(f"  {role} ({active_model}): starting", flush=True)
+            label = f'{role} ({active_model})' if active_model else role
             if 'tool' in value:
                 failed = isinstance(value['result'], dict) and 'error' in value['result']
-                print(f"  {role}: {value['tool']} {'failed' if failed else 'ok'}", flush=True)
+                print(f"  {label}: {value['tool']} {'failed' if failed else 'ok'}", flush=True)
             elif 'check' in value:
-                print(f"  {role}: {value['check']} passed", flush=True)
+                print(f"  {label}: {value['check']} passed", flush=True)
+            elif 'fallback' in value:
+                print(f"  {label}: local attempt failed; switching to {value['fallback']}", flush=True)
         cfg = self.story_config(run)
         tools = Tools(run['worktree'], role, cfg, log)
         fields = run['task']['fields']

@@ -811,6 +811,28 @@ class HarnessTests(unittest.TestCase):
         self.assertNotIn('transport-only', json.dumps(task))
         self.assertNotIn('secret-hidden', json.dumps(task))
 
+    def test_action_output_tracks_model_switch(self):
+        import io
+        from contextlib import redirect_stdout
+        workflow, _ = self.workflow()
+        run = self.run_data('develop')
+        run['task'] = {'fields': {'summary': 'Feature'}}
+        def execute(role, task, tools):
+            tools.log({'model': 'qwen2.5-coder:7b'})
+            tools.log({'tool': 'write_file', 'result': 'written'})
+            tools.log({'fallback': 'codex'})
+            tools.log({'model': 'gpt-6.1-sol'})
+            tools.log({'tool': 'run_check', 'result': {'error': 'bad syntax'}})
+            tools.log({'check': 'validate'})
+        workflow.ollama.run.side_effect = execute
+        output = io.StringIO()
+        with redirect_stdout(output):
+            workflow.agent(run, 'developer')
+        text = output.getvalue()
+        self.assertIn('developer (qwen2.5-coder:7b): write_file ok', text)
+        self.assertIn('developer (gpt-6.1-sol): run_check failed', text)
+        self.assertIn('developer (gpt-6.1-sol): validate passed', text)
+
 
 if __name__ == '__main__':
     unittest.main()
