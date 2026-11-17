@@ -1,62 +1,108 @@
 extends Node
 
 const UI = preload("res://ui/menu_ui.gd")
+const Main = preload("res://main.gd")
+const Board = preload("res://contract_board.gd")
+var failed: bool = false
 
 func _ready() -> void:
     if DisplayServer.get_name() == "headless":
-        call_deferred("run_checks")
+        call_deferred("check_theme")
 
 func require_condition(value: bool, message: String) -> bool:
     if not value:
-        push_error("KAN-24: " + message)
+        failed = true
+        push_error("KAN-24 theme: " + message)
         get_tree().quit(1)
     return value
 
-func run_checks() -> void:
-    # Let deferred construction and existing voyage regression finish first.
-    for frame in range(40):
-        await get_tree().process_frame
-    var main = get_parent()
-    var board = main.get_node("ContractBoard")
-    for panel in [main.market_panel, board.panel, main.get_node("Economy"), main.get_node("Trade"), main.get_node("Title"), main.get_node("Destination")]:
-        if not require_condition(panel.theme == UI.DEMO_THEME, "every existing panel must use the shared resource"):
-            return
-        for resolution in [Vector2(1280, 720), Vector2(1920, 1080)]:
-            if not require_condition(Rect2(Vector2.ZERO, resolution).encloses(panel.get_rect()), "panel must fit target viewport: " + str(panel.name)):
-                return
-    var actions: Array = [board.accept_button, board.complete_button]
-    for collection in [main.buy_buttons, main.buy_all_buttons, main.sell_buttons, main.sell_all_buttons]:
-        actions.append_array(collection.values())
-    for action in actions:
-        if not require_condition(action is Button and action.focus_mode == Control.FOCUS_ALL, "actions must use keyboard accessible native buttons"):
-            return
-        for state in ["normal", "hover", "pressed", "disabled", "focus"]:
-            if not require_condition(action.has_theme_stylebox(state), "missing shared button state: " + state):
-                return
-        if not require_condition(action.get_theme_stylebox("normal") != action.get_theme_stylebox("hover") and action.get_theme_stylebox("normal") != action.get_theme_stylebox("disabled") and action.get_theme_stylebox("pressed") != action.get_theme_stylebox("hover"), "button states must have distinct styles"):
-            return
-    # Exercise native disabled handling without changing gameplay fixtures.
-    var fixture := UI.panel(self, "ThemeStateFixture", Vector2.ZERO, Vector2(400, 160))
-    var column := UI.column(fixture)
-    var counter := [0]
-    var first := UI.button(column, "First", "First action", func(): counter[0] += 1)
-    var second := UI.button(column, "Second", "Second action", func(): counter[0] += 1)
-    await get_tree().process_frame
-    first.disabled = true
-    var point := first.get_global_rect().get_center()
+func activate(viewport: SubViewport, button: Button) -> void:
+    button.grab_focus()
+    if not require_condition(viewport.gui_get_focus_owner() == button, button.name + " must receive keyboard focus"):
+        return
+    # Deliver one complete keystroke before yielding. The concurrent voyage
+    # regression sends root-window mouse clicks, which can steal GUI focus.
     for down in [true, false]:
-        var click := InputEventMouseButton.new()
-        click.button_index = MOUSE_BUTTON_LEFT
-        click.pressed = down
-        click.position = point
-        get_viewport().push_input(click, true)
-    if not require_condition(counter[0] == 0, "disabled buttons must reject pointer activation"):
-        fixture.queue_free()
+        var event := InputEventKey.new()
+        event.keycode = KEY_ENTER
+        event.physical_keycode = KEY_ENTER
+        event.pressed = down
+        viewport.push_input(event, true)
+    await get_tree().process_frame
+
+func check_theme() -> void:
+    var host := SubViewportContainer.new()
+    host.position = Vector2(3000, 0)
+    host.mouse_filter = Control.MOUSE_FILTER_IGNORE
+    add_child(host)
+    var viewport := SubViewport.new()
+    viewport.size = Vector2i(1280, 720)
+    viewport.handle_input_locally = true
+    viewport.render_target_update_mode = SubViewport.UPDATE_ALWAYS
+    host.add_child(viewport)
+    viewport.gui_disable_input = false
+    var game = Main.new()
+    viewport.add_child(game)
+    var board = Board.new()
+    game.add_child(board)
+    await get_tree().process_frame
+    await get_tree().process_frame
+    for id in ["Title", "Destination", "Economy", "Market", "ContractPanel"]:
+        require_condition(game.get_node(id).theme == UI.DEMO_THEME, id + " must use the shared theme")
+    var buttons: Array[Button] = [game.trade_button, board.accept_button, board.complete_button]
+    for good_id in game.buy_buttons:
+        buttons.append(game.buy_buttons[good_id])
+        buttons.append(game.buy_all_buttons[good_id])
+        buttons.append(game.sell_buttons[good_id])
+        buttons.append(game.sell_all_buttons[good_id])
+    for button in buttons:
+        require_condition(button.focus_mode == Control.FOCUS_ALL, button.name + " must support keyboard focus")
+        var styles: Array[StyleBox] = []
+        for state in ["normal", "hover", "pressed", "disabled", "focus"]:
+            var style: StyleBox = button.get_theme_stylebox(state)
+            require_condition(style is StyleBoxFlat, button.name + " needs a flat " + state + " style")
+            require_condition(not styles.has(style), button.name + " needs distinct " + state + " styling")
+            styles.append(style)
+    var activations: Array[int] = [0]
+    game.trade_button.pressed.connect(func(): activations[0] += 1)
+    game.trade_feedback.text = "Awaiting keyboard permission query"
+    await activate(viewport, game.trade_button)
+    if not require_condition(activations[0] == 1 and "unavailable" in game.trade_feedback.text and not game.can_trade(), "Enter must activate Trade and report rejection at sea; activations=%d, feedback=%s" % [activations[0], game.trade_feedback.text]):
         return
-    first.disabled = false
-    first.grab_focus()
-    if not require_condition(first.has_focus() and first.find_next_valid_focus() == second, "focus and Tab navigation must reach the next action"):
-        fixture.queue_free()
+    game.sail_to(game.get_node("Port A"))
+    game._process(game.voyage_time + 1.0)
+    game.set_process(false)
+    game.trade_feedback.text = "Awaiting docked keyboard permission query"
+    await activate(viewport, game.trade_button)
+    if not require_condition(activations[0] == 2 and "permitted" in game.trade_feedback.text and game.can_trade(), "Enter must activate Trade while docked"):
         return
-    fixture.queue_free()
-    print("KAN-24 theme passed: shared panel resource, bounds at both target resolutions, native button state resources, disabled pointer rejection and focus navigation; human visual review remains required")
+    var disabled_button: Button = game.sell_buttons["sugar"]
+    require_condition(disabled_button.disabled, "selling empty cargo must remain disabled")
+    var coins: int = game.game_state.wallet.coins
+    var sales: Array[int] = [0]
+    disabled_button.pressed.connect(func(): sales[0] += 1)
+    await activate(viewport, disabled_button)
+    require_condition(sales[0] == 0 and game.game_state.wallet.coins == coins and game.game_state.cargo.quantity("sugar") == 0, "keyboard input must not activate disabled sales")
+    game.trade_button.grab_focus()
+    var tab := InputEventKey.new()
+    tab.keycode = KEY_TAB
+    tab.physical_keycode = KEY_TAB
+    tab.pressed = true
+    viewport.push_input(tab, true)
+    require_condition(viewport.gui_get_focus_owner() != null and viewport.gui_get_focus_owner() != game.trade_button, "Tab must navigate from Trade to another enabled control")
+    tab = tab.duplicate()
+    tab.pressed = false
+    viewport.push_input(tab, true)
+    for resolution in [Vector2i(1280, 720), Vector2i(1920, 1080)]:
+        viewport.size = resolution
+        await get_tree().process_frame
+        await get_tree().process_frame
+        var bounds := Rect2(Vector2.ZERO, Vector2(resolution))
+        for id in ["Title", "Destination", "Trade", "Economy", "Market", "ContractPanel"]:
+            var panel: Control = game.get_node(id)
+            require_condition(bounds.encloses(panel.get_global_rect()), "%s must fit at %s" % [id, resolution])
+        require_condition(game.trade_feedback.size.y >= game.trade_feedback.get_minimum_size().y, "Trade feedback must fit its button")
+        require_condition(game.wallet_value.get_global_rect().end.x <= game.get_node("Economy").get_global_rect().end.x, "wallet values must fit the cargo panel")
+    host.queue_free()
+    if not failed:
+        print("KAN-24 theme passed: shared panel resources; five distinct button states; Enter activation of Trade at sea and docked; disabled sale rejection; Tab navigation; panel bounds at 1280x720 and 1920x1080. Human visual approval remains pending.")

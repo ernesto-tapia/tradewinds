@@ -11,6 +11,7 @@ var voyage_progress: float = 0.0
 var remaining_time: float = 0.0
 var destination_feedback: Label
 var trade_feedback: Label
+var trade_button: Button
 var economy_feedback: Label
 var market_panel: PanelContainer
 var market_title: Label
@@ -65,9 +66,17 @@ func _ready() -> void:
     var destination := UI.panel(self, "Destination", Vector2(10, 68), Vector2(1260, 48))
     destination_feedback = UI.label(destination, "Choose Port A or Port B to sail")
     destination_feedback.add_to_group("destination_feedback")
-    var trade := UI.panel(self, "Trade", Vector2(220, 474), Vector2(480, 52))
-    trade.gui_input.connect(_trade_input)
-    trade_feedback = UI.label(trade, "Trade unavailable at sea", "Warning")
+    # Keep this permission query available at sea so keyboard and mouse users
+    # receive the same rejection feedback. Transactions retain their own gates.
+    trade_button = UI.button(self, "Trade", "", request_trade, true)
+    trade_button.theme = UI.DEMO_THEME
+    trade_button.position = Vector2(220, 470)
+    trade_button.size = Vector2(480, 56)
+    trade_button.accessibility_name = "Check trade permission"
+    trade_feedback = UI.label(trade_button, "Trade unavailable at sea", "Warning")
+    trade_feedback.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+    trade_feedback.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+    trade_feedback.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
     var cargo := UI.panel(self, "Economy", Vector2(10, 536), Vector2(690, 174))
     var cargo_column := UI.column(cargo)
     economy_feedback = UI.label(cargo_column, "Cargo and wallet", "Heading")
@@ -120,10 +129,6 @@ func _ship_input(event: InputEvent) -> void:
         ship.set_meta("selected", true)
         ship.color = Color("b68a43")
         caption(ship).text = "Selected"
-
-func _trade_input(event: InputEvent) -> void:
-    if pressed(event):
-        request_trade()
 
 func _transaction(good_id: String, purchasing: bool, all_units: bool) -> void:
     var accepted: bool
