@@ -16,8 +16,10 @@ var market_title: Label
 var market_rows: Dictionary = {}
 var buy_buttons: Dictionary = {}
 var sell_buttons: Dictionary = {}
+var buy_all_buttons: Dictionary = {}
+var sell_all_buttons: Dictionary = {}
 
-func box(id: String, at: Vector2, dimensions: Vector2, tint: Color, caption: String, parent: Node = self) -> ColorRect:
+func box(id: String, at: Vector2, dimensions: Vector2, tint: Color, text: String, parent: Node = self) -> ColorRect:
     var control := ColorRect.new()
     control.name = id
     control.position = at
@@ -31,7 +33,7 @@ func box(id: String, at: Vector2, dimensions: Vector2, tint: Color, caption: Str
     label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
     label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
     label.mouse_filter = Control.MOUSE_FILTER_IGNORE
-    label.text = caption
+    label.text = text
     control.add_child(label)
     return control
 
@@ -64,19 +66,27 @@ func _ready() -> void:
     market_panel = box("Market", Vector2(710, 65), Vector2(430, 540), Color("253447"), "Port market")
     caption(market_panel).vertical_alignment = VERTICAL_ALIGNMENT_TOP
     market_title = caption(box("MarketTitle", Vector2(10, 35), Vector2(410, 60), Color("35465b"), "Dock to open market", market_panel))
+    caption(box("PricePolicy", Vector2(10, 495), Vector2(410, 35), Color("35465b"), "Prices update per unit; bulk totals shown", market_panel))
     var index := 0
     for good_id in game_state.goods:
-        var y := 110.0 + index * 130.0
-        var row := box("Row_" + good_id, Vector2(10, y), Vector2(410, 55), Color("35465b"), game_state.goods[good_id].name, market_panel)
-        market_rows[good_id] = caption(row)
-        var buy_button := box("Buy_" + good_id, Vector2(10, y + 60), Vector2(195, 40), Color("46604c"), "Buy 1", market_panel)
-        var sell_button := box("Sell_" + good_id, Vector2(225, y + 60), Vector2(195, 40), Color("62523c"), "Sell 1", market_panel)
-        buy_button.mouse_filter = Control.MOUSE_FILTER_STOP
-        sell_button.mouse_filter = Control.MOUSE_FILTER_STOP
-        buy_button.gui_input.connect(_transaction_input.bind(good_id, true))
-        sell_button.gui_input.connect(_transaction_input.bind(good_id, false))
-        buy_buttons[good_id] = buy_button
-        sell_buttons[good_id] = sell_button
+        var y := 105.0 + index * 130.0
+        market_rows[good_id] = caption(box("Row_" + good_id, Vector2(10, y), Vector2(410, 45), Color("35465b"), game_state.goods[good_id].name, market_panel))
+        var controls: Array = []
+        for button_index in range(4):
+            var purchasing: bool = button_index < 2
+            var all_units: bool = button_index % 2 == 1
+            var prefix: String = "Buy" if purchasing else "Sell"
+            var text: String = prefix + (" all" if all_units else " 1")
+            var node_prefix: String = prefix + ("All_" if all_units else "_")
+            var tint: Color = Color("46604c") if purchasing else Color("62523c")
+            var button := box(node_prefix + good_id, Vector2(10 + button_index * 104, y + 50), Vector2(98, 55), tint, text, market_panel)
+            button.mouse_filter = Control.MOUSE_FILTER_STOP
+            button.gui_input.connect(_transaction_input.bind(good_id, purchasing, all_units))
+            controls.append(button)
+        buy_buttons[good_id] = controls[0]
+        buy_all_buttons[good_id] = controls[1]
+        sell_buttons[good_id] = controls[2]
+        sell_all_buttons[good_id] = controls[3]
         index += 1
     var camera := Camera2D.new()
     camera.position = Vector2(576, 324)
@@ -106,17 +116,26 @@ func _trade_input(event: InputEvent) -> void:
     if pressed(event):
         request_trade()
 
-func _transaction_input(event: InputEvent, good_id: String, purchasing: bool) -> void:
+func _transaction_input(event: InputEvent, good_id: String, purchasing: bool, all_units: bool = false) -> void:
     if pressed(event):
-        var accepted: bool = buy(good_id, 1) if purchasing else sell(good_id, 1)
+        var accepted: bool
+        if all_units:
+            accepted = buy_all(good_id) if purchasing else sell_all(good_id)
+        else:
+            accepted = buy(good_id, 1) if purchasing else sell(good_id, 1)
         trade_feedback.text = "Trade permitted: transaction completed" if accepted else "Trade unavailable: check stock, coins, cargo and docking"
 
 func sail_to(port: Control) -> void:
+    # A current-port click has zero travel time but does not end the visit.
+    if game_state.can_trade() and str(port.name) == game_state.docked_port_id:
+        voyage_time = 0.0
+        refresh_voyage()
+        refresh_market()
+        return
     if not game_state.start_voyage(str(port.name)):
         return
     voyage_time = game_state.voyage.duration
     set_meta("destination_id", str(port.name))
-    # A zero-distance voyage has already arrived inside start_voyage().
     if game_state.voyage.active:
         current_destination = port
         docked_port = null
@@ -164,6 +183,16 @@ func sell(good_id: String, quantity: int) -> bool:
     refresh_market()
     return accepted
 
+func buy_all(good_id: String) -> bool:
+    var accepted: bool = game_state.buy_all(good_id)
+    refresh_market()
+    return accepted
+
+func sell_all(good_id: String) -> bool:
+    var accepted: bool = game_state.sell_all(good_id)
+    refresh_market()
+    return accepted
+
 func get_market_data(port_id: String) -> Dictionary:
     if not game_state.markets.has(port_id):
         return {}
@@ -181,16 +210,23 @@ func refresh_market() -> void:
     if not can_trade():
         trade_feedback.text = "Trade unavailable at sea"
         return
-    market_title.text = "%s market | Wallet: %d coins\nGood | Stock | Unit price | Owned" % [game_state.docked_port_id, game_state.wallet.coins]
+    market_title.text = "%s market | Wallet: %d coins\nPrice bounds: 1 to twice base price" % [game_state.docked_port_id, game_state.wallet.coins]
     var market = game_state.markets[game_state.docked_port_id]
     for good_id in market_rows:
         var stock: int = int(market.inventory.get(good_id, 0))
         var price: int = int(market.prices.get(good_id, 0))
+        var sell_price: int = market.trade_total(good_id, 1, false)
         var owned: int = game_state.cargo.quantity(good_id)
-        market_rows[good_id].text = "%s | Stock %d | %d coins/unit | Owned %d" % [game_state.goods[good_id].name, stock, price, owned]
-        var can_buy: bool = price > 0 and stock > 0 and game_state.wallet.coins >= price and game_state.cargo.total() < game_state.ship.capacity
-        buy_buttons[good_id].color = Color("46604c") if can_buy else Color("444444")
+        market_rows[good_id].text = "%s | Stock %d | Owned %d\nNext unit: Buy %d / Sell %d coins" % [game_state.goods[good_id].name, stock, owned, price, sell_price]
+        var maximum: int = game_state.max_buy_quantity(good_id)
+        var buy_total: int = market.trade_total(good_id, maximum, true)
+        var sell_total: int = market.trade_total(good_id, owned, false)
+        buy_buttons[good_id].color = Color("46604c") if maximum > 0 else Color("444444")
+        buy_all_buttons[good_id].color = buy_buttons[good_id].color
         sell_buttons[good_id].color = Color("62523c") if owned > 0 else Color("444444")
-        caption(buy_buttons[good_id]).text = "Buy 1" if can_buy else "Buy 1 unavailable"
-        caption(sell_buttons[good_id]).text = "Sell 1" if owned > 0 else "Sell 1 unavailable"
+        sell_all_buttons[good_id].color = sell_buttons[good_id].color
+        caption(buy_buttons[good_id]).text = "Buy 1\n%d coins" % price if maximum > 0 else "Buy 1\nunavailable"
+        caption(sell_buttons[good_id]).text = "Sell 1\n%d coins" % sell_price if owned > 0 else "Sell 1\nunavailable"
+        caption(buy_all_buttons[good_id]).text = "Buy all (%d)\n%d coins" % [maximum, buy_total]
+        caption(sell_all_buttons[good_id]).text = "Sell all (%d)\n%d coins" % [owned, sell_total]
     trade_feedback.text = "Trade permitted at " + game_state.docked_port_id
