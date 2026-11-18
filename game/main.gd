@@ -219,6 +219,12 @@ func _transaction_input(event: InputEvent, good_id: String, purchasing: bool, al
         _transaction(good_id, purchasing, all_units)
 
 func sail_to(port: Control) -> void:
+    if game_state.can_trade() and str(port.name) == game_state.docked_port_id:
+        voyage_time = 0.0
+        refresh_voyage()
+        refresh_market()
+        refresh_provisioning_panel()
+        return
     var accepted: bool = game_state.start_voyage(str(port.name))
     if not accepted:
         UI.status(destination_feedback, game_state.departure_feedback, true)

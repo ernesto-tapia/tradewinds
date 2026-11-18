@@ -13,6 +13,8 @@ Supplies use the running game's reserve and remain separate from commodity cargo
 - Repeated departure, midpoint advancement and arrival do not charge again.
 - Independent fixed-distance fixtures require 1, 2 and 3 provisions for 100, 100.1 and 250 units respectively.
 
+`game/voyage_check.gd` retains the KAN-10 interaction regression instead of a state wrapper. Its isolated real game is seeded with 40 provisions, without altering normal starting supplies. Viewport mouse events sail A/B/A/B, verify positive travel time, midpoint position and displayed 50% progress/remaining time, completed docking, stopped position on later frames, and current-port clicks preserving docking, completed progress, market access and provisions. Native Trade activation checks permission at sea and while docked. Keyboard fixtures run sequentially to avoid stealing focus from one another. The restored current-port guard resets displayed voyage duration without charging supplies.
+
 The success marker is `KAN-16 provisioning acceptance passed:` and is emitted only after all assertions finish. Failures log `KAN-16 provisioning:` and terminate with exit 1. The configured smoke and exported-executable smoke checks execute it, alongside economy, contract, contract UI and theme checks.
 
 Validation and full command receipts are recorded by the host for the exact committed head in `.runs/907cf6afd710/validation-<full-sha>.json`; those receipts, rather than this document, establish commit attribution, actual output and exit status. Separate disposable mutation checks confirmed that removing the shortage guard and rounding costs down each produce exit 1. Human visual approval remains separate.
