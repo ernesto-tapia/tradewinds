@@ -1,20 +1,27 @@
 # KAN-16 — Voyage provisioning and consumption
 
-Supplies use the running game's reserve and remain separate from commodity cargo. Dock purchases add four provisions for eight coins. The HUD, provisioning panel, and destination tooltip show required supplies; rejected departures show required and available amounts. Provision cost is ceil(distance / 100), charged once at departure.
+Supplies use the running game's reserve and remain separate from commodity cargo. Dock purchases add four provisions for eight coins. Departure costs ceil(distance / 100), charged once when sailing starts. Insufficient reserves block departure and display required and available amounts.
 
-## Executable acceptance coverage
+While sailing, both port tooltips state that departure is unavailable and show the fixed amount already charged. They do not quote a decreasing cost from the moving ship. Docking restores departure quotes from the arrival port. The sailing HUD rebuilds its accepted departure summary from voyage data, so transient rejected clicks cannot erase the required and consumed amounts on subsequent refreshes.
 
-`game/provisioning_check.gd` is attached to the main scene and automatically schedules its checks in headless mode. It creates an isolated real game and provisioning panel in a SubViewport, then sends actual mouse events to the port controls.
+## Executable regression coverage
 
-- Docking enables purchases; buying supplies adds exactly four and deducts eight coins.
-- The real Port A-to-B route requires four provisions; the panel displays A=0/B=4, and the HUD and destination tooltip show the required amount before departure.
-- Zero and three provisions reject the port click, preserve position, docking, reserves, money, cargo and voyage state, and display required/available amounts.
-- Exactly four provisions allow sailing and leave zero, with four consumed displayed in the HUD and provisioning panel.
-- Repeated departure, midpoint advancement and arrival do not charge again.
-- Independent fixed-distance fixtures require 1, 2 and 3 provisions for 100, 100.1 and 250 units respectively.
+`game/provisioning_check.gd` is attached to `game/main.tscn` and automatically schedules its checks in headless mode. Its isolated real game and provisioning panel receive viewport mouse events.
 
-`game/voyage_check.gd` retains the KAN-10 interaction regression instead of a state wrapper. Its isolated real game is seeded with 40 provisions, without altering normal starting supplies. Viewport mouse events sail A/B/A/B, verify positive travel time, midpoint position and displayed 50% progress/remaining time, completed docking, stopped position on later frames, and current-port clicks preserving docking, completed progress, market access and provisions. Native Trade activation checks permission at sea and while docked. Keyboard fixtures run sequentially to avoid stealing focus from one another. The restored current-port guard resets displayed voyage duration without charging supplies.
+- Docking enables the actual Buy Provisions button. A pointer click activates it exactly once, adds four provisions, deducts eight coins, and updates purchase feedback and displayed balance.
+- The Port A-to-B route requires four provisions. Before departure, the panel displays A=0/B=4 and the HUD and tooltip show the requirement.
+- Zero and three provisions reject port clicks atomically, preserving docking, position, reserves, money, cargo and voyage state while displaying required and available amounts.
+- Exactly four provisions allow departure, consume four once, and display the zero remaining balance.
+- Rejected underway clicks do not charge again. The refreshed midpoint HUD retains the accepted required/consumed summary.
+- Both port tooltips show the fixed four-provision charge at departure, midpoint and 75% progress. Arrival restores A=4/B=0 departure quotes and panel requirements.
+- Midpoint and arrival updates do not charge again. Independent fixtures verify rounding at 100, 100.1 and 250 units.
 
-The success marker is `KAN-16 provisioning acceptance passed:` and is emitted only after all assertions finish. Failures log `KAN-16 provisioning:` and terminate with exit 1. The configured smoke and exported-executable smoke checks execute it, alongside economy, contract, contract UI and theme checks.
+The pointer fixture waits for the theme and voyage input fixtures to finish. Initial attempts using an offscreen SubViewportContainer failed the purchase assertion with zero button activations. The fixture now uses a standalone SubViewport with injected local pointer coordinates and one mouse-entry notification. It retains the resource, activation, feedback and visibility assertions; it does not call the purchase handler directly.
 
-Validation and full command receipts are recorded by the host for the exact committed head in `.runs/907cf6afd710/validation-<full-sha>.json`; those receipts, rather than this document, establish commit attribution, actual output and exit status. Separate disposable mutation checks confirmed that removing the shortage guard and rounding costs down each produce exit 1. Human visual approval remains separate.
+`game/voyage_check.gd` retains the KAN-10 interaction regression. Its isolated game is seeded with 40 provisions for repeated A/B/A/B voyages. Assertions cover midpoint position and displayed progress, arrival docking, stopped position, trade permission, and current-port clicks preserving reserves and docking while resetting scene voyage duration to zero.
+
+## Recorded checks
+
+After the final source and fixture edits, the host ran `validate`, `scene`, `smoke` and `export` successfully. Smoke and export returned both the KAN-10 interaction and KAN-16 provisioning acceptance markers. Earlier smoke attempts failed the pointer purchase assertion; those failures were resolved by correcting viewport input delivery without weakening assertions.
+
+The host retains actual command receipts. Human visual approval remains pending; headless checks do not establish visual quality. Independent QA and exact-head review remain the host's responsibility. Human merges the PR; this document does not mark the story Done.

@@ -259,7 +259,10 @@ func refresh_route_requirements() -> void:
     for port_id in game_state.ports:
         var port := get_node_or_null(NodePath(port_id)) as Control
         if port != null:
-            port.tooltip_text = "%s requires %d provisions; aboard %d. Supplies cost 2 coins each at dock." % [port_id, game_state.required_provisions(port_id), game_state.provisions]
+            if game_state.voyage.active:
+                port.tooltip_text = "%s: departure unavailable while sailing to %s; charged %d provisions at departure; aboard %d." % [port_id, game_state.voyage.destination_id, game_state.voyage.provisions_consumed, game_state.provisions]
+            else:
+                port.tooltip_text = "%s requires %d provisions; aboard %d. Supplies cost 2 coins each at dock." % [port_id, game_state.required_provisions(port_id), game_state.provisions]
 
 func refresh_provisioning_panel() -> void:
     refresh_route_requirements()
@@ -272,7 +275,9 @@ func refresh_voyage() -> void:
     voyage_progress = game_state.voyage.progress
     remaining_time = game_state.voyage.remaining_time
     if game_state.voyage.active:
-        UI.status(destination_feedback, "Sailing to %s: %d%% | %.1f seconds remaining\n%s" % [game_state.voyage.destination_id, roundi(voyage_progress * 100.0), remaining_time, game_state.departure_feedback])
+        # Accepted voyage data survives transient rejected clicks while underway.
+        var summary := "Departure to %s requires %d provisions; consumed %d." % [game_state.voyage.destination_id, game_state.voyage.provisions_consumed, game_state.voyage.provisions_consumed]
+        UI.status(destination_feedback, "Sailing to %s: %d%% | %.1f seconds remaining\n%s" % [game_state.voyage.destination_id, roundi(voyage_progress * 100.0), remaining_time, summary])
     else:
         UI.status(destination_feedback, "Docked at %s · Aboard: %d provisions\nPort A requires %d; Port B requires %d provisions." % [game_state.docked_port_id, game_state.provisions, game_state.required_provisions("Port A"), game_state.required_provisions("Port B")])
     refresh_route_requirements()

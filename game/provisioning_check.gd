@@ -14,16 +14,19 @@ func require_condition(value: bool, message: String) -> bool:
         get_tree().quit(1)
     return value
 
-func click_port(viewport: SubViewport, port: Control) -> void:
-    var point := port.get_global_transform_with_canvas() * (port.size / 2.0)
+func click_port(viewport: SubViewport, control: Control) -> void:
+    var point := control.get_global_transform_with_canvas() * (control.size / 2.0)
     var motion := InputEventMouseMotion.new()
     motion.position = point
+    motion.global_position = point
     viewport.push_input(motion, true)
     for down in [true, false]:
         var event := InputEventMouseButton.new()
         event.button_index = MOUSE_BUTTON_LEFT
         event.pressed = down
+        event.button_mask = MOUSE_BUTTON_MASK_LEFT if down else 0
         event.position = point
+        event.global_position = point
         viewport.push_input(event, true)
     await get_tree().process_frame
 
@@ -48,16 +51,37 @@ func check_rounding() -> bool:
             return false
     return true
 
+func check_sailing_tooltips(game) -> bool:
+    for port_id in ["Port A", "Port B"]:
+        var tooltip: String = game.get_node(port_id).tooltip_text
+        if not require_condition("departure unavailable while sailing to Port B" in tooltip and "charged 4 provisions at departure" in tooltip and "aboard 0" in tooltip and not "requires" in tooltip, "underway tooltips show fixed charge and unavailable departure for " + port_id):
+            return false
+    return true
+
 func run_checks() -> void:
     if not check_rounding():
         return
-    var host := SubViewportContainer.new()
-    host.position = Vector2(3000, 0)
+    await get_tree().process_frame
+    for check_name in ["ThemeStateCheck", "VoyageInteractionCheck"]:
+        var other := get_parent().get_node_or_null(NodePath(check_name))
+        for frame in range(90):
+            if other == null or other.get_child_count() == 0:
+                break
+            await get_tree().process_frame
+        if not require_condition(other == null or other.get_child_count() == 0, check_name + " must finish before provisioning pointer input"):
+            return
+    # A standalone viewport uses its injected local mouse coordinates. A
+    # SubViewportContainer instead derives hover from the native window mouse,
+    # which is outside an offscreen container. Keep all purchase assertions.
+    var host := Node.new()
     add_child(host)
     var viewport := SubViewport.new()
     viewport.size = Vector2i(1280, 720)
     viewport.handle_input_locally = true
+    viewport.render_target_update_mode = SubViewport.UPDATE_ALWAYS
     host.add_child(viewport)
+    viewport.gui_disable_input = false
+    viewport.notify_mouse_entered()
     var game = Main.new()
     viewport.add_child(game)
     game.set_process(false)
@@ -76,7 +100,20 @@ func run_checks() -> void:
         return
     var coins: int = game.game_state.wallet.coins
     var reserve: int = game.game_state.provisions
-    if not require_condition(supplies.buy_provisions() and game.game_state.provisions == reserve + 4 and game.game_state.wallet.coins == coins - 8, "purchase adds four supplies and charges eight coins"):
+    var scroll := supplies.buy_button.get_parent().get_parent() as ScrollContainer
+    scroll.ensure_control_visible(supplies.buy_button)
+    await get_tree().process_frame
+    await get_tree().process_frame
+    var button_rect: Rect2 = supplies.buy_button.get_global_rect()
+    var visible_rect: Rect2 = scroll.get_global_rect().intersection(button_rect)
+    if not require_condition(visible_rect.has_point(button_rect.get_center()), "purchase button center must be visible; button=%s scroll=%s" % [button_rect, scroll.get_global_rect()]):
+        return
+    var activations: Array[int] = [0]
+    supplies.buy_button.pressed.connect(func(): activations[0] += 1)
+    await click_port(viewport, supplies.buy_button)
+    if not require_condition(activations[0] == 1 and game.game_state.provisions == reserve + 4 and game.game_state.wallet.coins == coins - 8 and "Bought 4 provisions" in supplies.feedback.text, "purchase button adds four supplies, charges eight coins and shows feedback; activations=%d reserve=%d coins=%d feedback=%s hovered=%s button=%s scroll=%s" % [activations[0], game.game_state.provisions, game.game_state.wallet.coins, supplies.feedback.text, viewport.gui_get_hovered_control(), button_rect, scroll.get_global_rect()]):
+        return
+    if not require_condition(("Balance: %d provisions" % (reserve + 4)) in supplies.balance_label.text, "purchase updates displayed reserve"):
         return
     # Actual A-to-B distance is 319.53: ceil(distance / 100) = 4.
     if not require_condition(game.game_state.required_provisions("Port B") == 4, "actual A-to-B route requires four"):
@@ -106,15 +143,31 @@ func run_checks() -> void:
     if not require_condition(game.game_state.voyage.active and game.game_state.provisions == 0 and game.game_state.voyage.provisions_consumed == 4, "exactly four permits departure and deducts four once"):
         return
     supplies.refresh_provisioning()
-    if not require_condition("consumed 4" in game.destination_feedback.text and "Consumed at departure: 4" in supplies.route_label.text, "sailing HUD and panel display exact consumption"):
+    if not require_condition("consumed 4" in game.destination_feedback.text and "Consumed at departure: 4" in supplies.route_label.text and "Balance: 0 provisions" in supplies.balance_label.text, "sailing HUD and panel display exact consumption and remaining balance"):
+        return
+    if not check_sailing_tooltips(game):
+        return
+    await click_port(viewport, game.get_node("Port B"))
+    if not require_condition(game.game_state.voyage.active and game.game_state.provisions == 0 and "Already sailing" in game.destination_feedback.text, "repeated port click rejects departure without another charge"):
         return
     if not require_condition(not game.game_state.start_voyage("Port B") and game.game_state.provisions == 0, "repeated departure cannot charge twice"):
         return
     game._process(game.voyage_time / 2.0)
     if not require_condition(game.game_state.voyage.active and game.game_state.provisions == 0, "midpoint consumes no additional supplies"):
         return
+    if not require_condition("50%" in game.destination_feedback.text and "requires 4 provisions; consumed 4" in game.destination_feedback.text, "midpoint HUD retains accepted departure summary after rejected clicks"):
+        return
+    if not check_sailing_tooltips(game):
+        return
+    game._process(game.voyage_time / 4.0)
+    if not check_sailing_tooltips(game):
+        return
     game._process(game.voyage_time + 1.0)
     if not require_condition(game.game_state.docked_port_id == "Port B" and not game.game_state.voyage.active and game.game_state.provisions == 0, "arrival retains exact remaining reserve"):
         return
+    if not require_condition("Port A requires 4 provisions; aboard 0" in game.get_node("Port A").tooltip_text and "Port B requires 0 provisions; aboard 0" in game.get_node("Port B").tooltip_text, "arrival restores departure quotes from docked position"):
+        return
+    if not require_condition("Port A 4" in supplies.route_label.text and "Port B 0" in supplies.route_label.text, "arrival restores panel departure requirements"):
+        return
     host.queue_free()
-    print("KAN-16 provisioning acceptance passed: real clicks reject zero/one-short supplies atomically; displayed A=0/B=4 requirements and rejection amounts; exact-four departure consumes once; no repeat/midpoint/arrival charge; 100/100.1/250-unit rounding; dock purchase +4/-8.")
+    print("KAN-16 provisioning acceptance passed: pointer purchase +4/-8 and displayed balance; real clicks reject zero/one-short supplies atomically; displayed A=0/B=4 requirements and rejection amounts; exact-four departure consumes once; rejected underway clicks preserve refreshed summary; fixed-charge tooltips at departure/midpoint/75%, dock quotes restored on arrival; no repeat/midpoint/arrival charge; 100/100.1/250-unit rounding.")
