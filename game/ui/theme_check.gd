@@ -93,6 +93,17 @@ func check_theme() -> void:
     tab = tab.duplicate()
     tab.pressed = false
     viewport.push_input(tab, true)
+    for menu in ["contracts", "cargo", "market"]:
+        game.menu_buttons[menu].grab_focus()
+        await activate(viewport, game.menu_buttons[menu])
+        require_condition(game.active_menu == menu, "navigation must open " + menu)
+        require_condition(game.market_panel.visible == (menu == "market"), "market must not compete with another panel")
+        require_condition(board.panel.visible == (menu == "contracts"), "contracts must not compete with another panel")
+        require_condition(game.get_node("Economy").visible == (menu == "cargo"), "cargo must not compete with another panel")
+    game.select_commodity("coffee")
+    for good_id in game.commodity_sections:
+        require_condition(game.commodity_sections[good_id].visible == (good_id == "coffee"), "only the selected commodity should be shown")
+    game.select_commodity("sugar")
     for resolution in [Vector2i(1280, 720), Vector2i(1920, 1080)]:
         viewport.size = resolution
         await get_tree().process_frame
@@ -100,9 +111,16 @@ func check_theme() -> void:
         var bounds := Rect2(Vector2.ZERO, Vector2(resolution))
         for id in ["Title", "Destination", "Trade", "Economy", "Market", "ContractPanel"]:
             var panel: Control = game.get_node(id)
-            require_condition(bounds.encloses(panel.get_global_rect()), "%s must fit at %s" % [id, resolution])
+            require_condition(bounds.encloses(panel.get_global_rect()), "%s %s must fit at %s" % [id, panel.get_global_rect(), resolution])
         require_condition(game.trade_feedback.size.y >= game.trade_feedback.get_minimum_size().y, "Trade feedback must fit its button")
         require_condition(game.wallet_value.get_global_rect().end.x <= game.get_node("Economy").get_global_rect().end.x, "wallet values must fit the cargo panel")
+        for menu in ["contracts", "cargo", "market"]:
+            game.show_menu(menu)
+            await get_tree().process_frame
+            await get_tree().process_frame
+            var panel_id: String = {"contracts": "ContractPanel", "cargo": "Economy", "market": "Market"}[menu]
+            var detail: Control = game.get_node(panel_id)
+            require_condition(bounds.encloses(detail.get_global_rect()), menu + " content must fit when opened")
     host.queue_free()
     if not failed:
-        print("KAN-24 theme passed: shared panel resources; five distinct button states; Enter activation of Trade at sea and docked; disabled sale rejection; Tab navigation; panel bounds at 1280x720 and 1920x1080. Human visual approval remains pending.")
+        print("KAN-24 theme passed: shared panel resources; five distinct button states; Enter activation of Trade at sea and docked; disabled sale rejection; Tab navigation; exclusive Market/Contracts/Cargo tabs; selected commodity only; opened panel bounds at 1280x720 and 1920x1080. Human visual approval remains pending.")

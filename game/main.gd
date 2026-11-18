@@ -23,6 +23,10 @@ var sell_all_buttons: Dictionary = {}
 var cargo_values: Dictionary = {}
 var wallet_value: Label
 var capacity_value: Label
+var active_menu: String = "contracts"
+var selected_good: String = "sugar"
+var commodity_sections: Dictionary = {}
+var menu_buttons: Dictionary = {}
 
 func box(id: String, at: Vector2, dimensions: Vector2, tint: Color, text: String, parent: Node = self) -> ColorRect:
     var control := ColorRect.new()
@@ -49,7 +53,17 @@ func caption(control: Control) -> Label:
 func _ready() -> void:
     box("Ocean", Vector2.ZERO, Vector2(1280, 720), Color("163e58"), "Ocean")
     var title := UI.panel(self, "Title", Vector2(10, 10), Vector2(1260, 48))
-    UI.label(title, "Caribbean Tradewinds", "Heading")
+    var header := UI.row(title)
+    UI.label(header, "Caribbean Tradewinds", "Heading")
+    UI.label(header, "Coins").size_flags_horizontal = Control.SIZE_SHRINK_END
+    wallet_value = UI.label(header, "0")
+    wallet_value.size_flags_horizontal = Control.SIZE_SHRINK_END
+    UI.label(header, "Cargo").size_flags_horizontal = Control.SIZE_SHRINK_END
+    capacity_value = UI.label(header, "0/20")
+    capacity_value.size_flags_horizontal = Control.SIZE_SHRINK_END
+    for item in header.get_children():
+        if item is Label:
+            item.autowrap_mode = TextServer.AUTOWRAP_OFF
     box("Island", Vector2(220, 170), Vector2(140, 130), Color("476445"), "Island")
     box("Island B", Vector2(530, 300), Vector2(150, 120), Color("476445"), "Island")
     for port_id in game_state.ports:
@@ -63,12 +77,12 @@ func _ready() -> void:
     ship.add_to_group("player_ship")
     ship.set_meta("selected", false)
     ship.gui_input.connect(_ship_input)
-    var destination := UI.panel(self, "Destination", Vector2(10, 68), Vector2(1260, 48))
+    var destination := UI.panel(self, "Destination", Vector2(10, 68), Vector2(690, 48))
     destination_feedback = UI.label(destination, "Choose Port A or Port B to sail")
     destination_feedback.add_to_group("destination_feedback")
     # Keep this permission query available at sea so keyboard and mouse users
     # receive the same rejection feedback. Transactions retain their own gates.
-    trade_button = UI.button(self, "Trade", "", request_trade, true)
+    trade_button = UI.button(self, "Trade", "", open_trade, true)
     trade_button.theme = UI.DEMO_THEME
     trade_button.position = Vector2(220, 470)
     trade_button.size = Vector2(480, 56)
@@ -77,13 +91,23 @@ func _ready() -> void:
     trade_feedback.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
     trade_feedback.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
     trade_feedback.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-    var cargo := UI.panel(self, "Economy", Vector2(10, 536), Vector2(690, 174))
-    var cargo_column := UI.column(cargo)
-    economy_feedback = UI.label(cargo_column, "Cargo and wallet", "Heading")
+    var navigation := HBoxContainer.new()
+    navigation.name = "MenuNavigation"
+    navigation.theme = UI.DEMO_THEME
+    navigation.position = Vector2(710, 68)
+    navigation.size = Vector2(560, 48)
+    add_child(navigation)
+    for menu in ["market", "contracts", "cargo"]:
+        var action := UI.button(navigation, "Open_" + menu, menu.capitalize(), show_menu.bind(menu))
+        action.custom_minimum_size.y = 48
+        action.toggle_mode = true
+        action.button_pressed = menu == active_menu
+        menu_buttons[menu] = action
+    var cargo := UI.panel(self, "Economy", Vector2(710, 126), Vector2(560, 584))
+    cargo.visible = false
+    var cargo_column := UI.scroll_column(cargo)
+    economy_feedback = UI.label(cargo_column, "Cargo manifest", "Heading")
     var cargo_row := UI.row(cargo_column)
-    var balances := UI.column(cargo_row)
-    wallet_value = UI.value_row(balances, "Coins")
-    capacity_value = UI.value_row(balances, "Hold used")
     var quantities := UI.column(cargo_row)
     for good_id in game_state.goods:
         cargo_values[good_id] = UI.value_row(quantities, game_state.goods[good_id].name)
@@ -96,10 +120,21 @@ func _build_market() -> void:
     var column := UI.column(market_panel)
     UI.label(column, "Port market", "Heading")
     market_title = UI.label(column, "Dock to open market")
+    var selector := OptionButton.new()
+    selector.name = "CommoditySelector"
+    selector.custom_minimum_size.y = 48
+    selector.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+    for good_id in game_state.goods:
+        selector.add_item(game_state.goods[good_id].name)
+        selector.set_item_metadata(selector.item_count - 1, good_id)
+    selector.item_selected.connect(func(index: int): select_commodity(str(selector.get_item_metadata(index))))
+    column.add_child(selector)
     var content := UI.scroll_column(column)
     for good_id in game_state.goods:
         var section := PanelContainer.new()
         section.name = "Row_" + good_id
+        section.visible = good_id == selected_good
+        commodity_sections[good_id] = section
         content.add_child(section)
         var rows := UI.column(section)
         UI.label(rows, game_state.goods[good_id].name, "Heading")
@@ -115,7 +150,22 @@ func _build_market() -> void:
         sell_buttons[good_id] = UI.button(actions, "Sell_" + good_id, "Sell 1", _transaction.bind(good_id, false, false))
         sell_all_buttons[good_id] = UI.button(actions, "SellAll_" + good_id, "Sell all", _transaction.bind(good_id, false, true))
         actions.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-    UI.label(column, "Prices update per unit; bulk totals shown. Bounds: 1 to twice base price.")
+    selector.tooltip_text = "Prices change after each unit traded. Bulk buttons show the total."
+
+func select_commodity(good_id: String) -> void:
+    selected_good = good_id
+    for key in commodity_sections:
+        commodity_sections[key].visible = key == good_id
+
+func show_menu(menu: String) -> void:
+    active_menu = menu
+    for key in menu_buttons:
+        menu_buttons[key].button_pressed = key == menu
+    get_node("Economy").visible = menu == "cargo"
+    var contracts := get_node_or_null("ContractPanel") as Control
+    if contracts != null:
+        contracts.visible = menu == "contracts"
+    market_panel.visible = menu == "market" and can_trade()
 
 func pressed(event: InputEvent) -> bool:
     return event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT and event.pressed
@@ -180,7 +230,7 @@ func refresh_voyage() -> void:
     if game_state.voyage.active:
         destination_feedback.text = "Sailing to %s: %d%% | %.1f seconds remaining" % [game_state.voyage.destination_id, roundi(voyage_progress * 100.0), remaining_time]
     else:
-        destination_feedback.text = "Docked at %s: 100%% | 0 seconds remaining" % game_state.docked_port_id
+        destination_feedback.text = "Docked at %s · Select a port to sail" % game_state.docked_port_id
 
 func can_trade() -> bool:
     return game_state.can_trade()
@@ -189,6 +239,10 @@ func request_trade() -> bool:
     trade_feedback.text = "Trade permitted at " + game_state.docked_port_id if can_trade() else "Trade unavailable at sea"
     trade_feedback.theme_type_variation = "Label" if can_trade() else "Warning"
     return can_trade()
+
+func open_trade() -> void:
+    if request_trade():
+        show_menu("market")
 
 func buy(good_id: String, quantity: int) -> bool:
     var accepted: bool = game_state.buy(good_id, quantity)
@@ -223,7 +277,7 @@ func refresh_market() -> void:
     capacity_value.text = "%d/%d" % [game_state.cargo.total(), game_state.ship.capacity]
     for good_id in cargo_values:
         cargo_values[good_id].text = str(game_state.cargo.quantity(good_id))
-    market_panel.visible = can_trade()
+    market_panel.visible = can_trade() and active_menu == "market"
     for good_id in market_rows:
         var owned: int = game_state.cargo.quantity(good_id)
         var maximum: int = game_state.max_buy_quantity(good_id)
@@ -243,5 +297,5 @@ func refresh_market() -> void:
         buy_all_buttons[good_id].text = "Buy all (%d)\n%d coins" % [maximum, market.trade_total(good_id, maximum, true)]
         sell_all_buttons[good_id].text = "Sell all (%d)\n%d coins" % [owned, market.trade_total(good_id, owned, false)]
     if can_trade():
-        market_title.text = "%s | Wallet: %d coins" % [game_state.docked_port_id, game_state.wallet.coins]
+        market_title.text = game_state.docked_port_id
     request_trade()

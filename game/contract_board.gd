@@ -15,12 +15,13 @@ func _ready() -> void:
 func build_board() -> void:
     var main = get_parent()
     delivery = Delivery.new(main.game_state)
-    panel = UI.panel(main, "ContractPanel", Vector2(10, 126), Vector2(200, 400))
+    panel = UI.panel(main, "ContractPanel", Vector2(710, 126), Vector2(560, 584))
+    panel.visible = main.active_menu == "contracts"
     var content := UI.scroll_column(panel)
     UI.label(content, "Delivery contract", "Heading")
     details = UI.label(content, "Deliver 3 Sugar to Port B for 30 coins.")
-    accept_button = UI.button(content, "AcceptContract", "Accept at\nPort A", accept_contract, true)
-    complete_button = UI.button(content, "CompleteContract", "Deliver at\nPort B", complete_contract, true)
+    accept_button = UI.button(content, "AcceptContract", "Accept at Port A", accept_contract, true)
+    complete_button = UI.button(content, "CompleteContract", "Deliver at Port B", complete_contract, true)
     feedback = UI.label(content, "Buy cargo in the port market.")
     refresh_contract()
 
