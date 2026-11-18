@@ -238,7 +238,30 @@ class HarnessTests(unittest.TestCase):
         workflow.verify_merged = Mock(return_value={'sha': 'merge', 'passed': True,
             'checks': {'validate': {'command': ['fixture-check'], 'cwd': str(self.root), 'exit_code': 0, 'output': 'verified fixture output'}}, 'errors': []})
         workflow.has_feature_changes = Mock(return_value=True)
+        workflow.verify_review = Mock(return_value={'sha': 'abc', 'passed': True,
+            'checks': {'validate': {'command': ['real-check'], 'exit_code': 0, 'output': 'actual evidence'}}, 'errors': []})
         return workflow, store
+
+    def test_review_receives_exact_head_command_receipts(self):
+        workflow, _ = self.workflow()
+        workflow.github.checks_pass.return_value = True
+        workflow.git = Mock(side_effect=lambda *args, **kwargs: 'abc' if args[0] == 'rev-parse' else '')
+        workflow.github.pr.return_value = {'merged': False, 'state': 'open', 'head': {'sha': 'abc'}}
+        workflow.codex.review.return_value = {'passed': True}
+        workflow.advance(self.run_data('review'))
+        proof = workflow.codex.review.call_args.args[4]['pr_head_validation']
+        self.assertEqual(proof['sha'], 'abc')
+        self.assertEqual(proof['checks']['validate']['exit_code'], 0)
+        self.assertEqual(proof['checks']['validate']['output'], 'actual evidence')
+
+    def test_failed_exact_head_checks_block_review(self):
+        workflow, _ = self.workflow()
+        workflow.git = Mock(side_effect=lambda *args, **kwargs: 'abc' if args[0] == 'rev-parse' else '')
+        workflow.github.pr.return_value = {'merged': False, 'state': 'open', 'head': {'sha': 'abc'}}
+        workflow.verify_review.return_value = {'sha': 'abc', 'passed': False, 'errors': ['export failed']}
+        result = workflow.advance(self.run_data('review'), stop_before='develop')
+        self.assertEqual(result['stage'], 'develop')
+        workflow.codex.review.assert_not_called()
 
     def run_data(self, stage):
         return {'id': 'run', 'key': 'KAN-8', 'stage': stage, 'worktree': str(self.root),

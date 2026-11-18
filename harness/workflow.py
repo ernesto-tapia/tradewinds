@@ -229,6 +229,31 @@ class Workflow:
                 'source_clean': clean, 'passed': not errors and set(tools.checks) == set(cfg['commands']),
                 'checks': tools.receipts, 'errors': errors}
 
+    def verify_review(self, run, sha):
+        cwd = run['worktree']
+        if self.git('rev-parse', 'HEAD', cwd=cwd) != sha or self.git('status', '--porcelain', cwd=cwd):
+            raise RuntimeError('Review validation requires a clean checkout of the exact PR head')
+        cfg = self.story_config(run)
+        engine_version = command([cfg['godot'], '--version'], cwd).strip()
+        if cfg.get('godot_version') and not engine_version.startswith(cfg['godot_version'] + '.'):
+            raise RuntimeError(f"Expected Godot {cfg['godot_version']}, got {engine_version}")
+        tools = Tools(cwd, 'qa', cfg, lambda value: self.store.log(run['id'], 'review-checks', value))
+        errors = []
+        for name in cfg['commands']:
+            try:
+                tools.call('run_check', {'name': name})
+                print(f'  PR head {sha[:12]}: {name} passed', flush=True)
+            except (KeyError, ValueError, OSError, RuntimeError, subprocess.TimeoutExpired) as error:
+                errors.append(f'{name}: {error}')
+                break
+        clean = not self.git('status', '--porcelain', cwd=cwd)
+        same_head = self.git('rev-parse', 'HEAD', cwd=cwd) == sha
+        if not clean or not same_head:
+            errors.append('Source changed during exact-head validation')
+        return {'sha': sha, 'godot_version': engine_version, 'checkout': str(cwd), 'source_clean': clean, 'head_unchanged': same_head,
+                'passed': not errors and set(tools.checks) == set(cfg['commands']),
+                'checks': tools.receipts, 'errors': errors}
+
     def advance(self, run, stop_before=None):
         try:
             while True:
@@ -305,12 +330,26 @@ class Workflow:
                         continue
                     if self.git('rev-parse', 'HEAD', cwd=cwd) != sha or self.git('status', '--porcelain', cwd=cwd):
                         raise RuntimeError('Local worktree differs from the PR head; refusing stale review')
-                    value = self.codex.review(cwd, run['task'], sha, 'review', run['qa'])
+                    run['review_validation'] = self.verify_review(run, sha)
+                    self.store.save(run)
+                    if not run['review_validation']['passed'] or run['review_validation']['sha'] != sha:
+                        self.repair(run, {'passed': False, 'summary': 'Exact PR head validation failed',
+                                          'evidence': [], 'gaps': run['review_validation']['errors']})
+                        continue
+                    value = self.codex.review(cwd, run['task'], sha, 'review', {
+                        'qa': run['qa'], 'pr_head_validation': run['review_validation']})
                     if self.github.pr(run['pr'])['head']['sha'] != sha:
                         continue
                     if self.git('rev-parse', 'HEAD', cwd=cwd) != sha or self.git('status', '--porcelain', cwd=cwd):
                         raise RuntimeError('Worktree changed during Codex review; report was not accepted')
-                    self.github.comment(run['pr'], f"{run['id']}-review-{sha}", 'Codex review of `' + sha + '`\n```json\n' + json.dumps(value, indent=2) + '\n```')
+                    proof = copy.deepcopy(run['review_validation'])
+                    for receipt in proof['checks'].values():
+                        for entry in (receipt, receipt.get('exported_executable_launch', {})):
+                            output = entry.get('output', '')
+                            if len(output) > 3000:
+                                entry['output'] = output[-3000:]
+                                entry['output_truncated'] = True
+                    self.github.comment(run['pr'], f"{run['id']}-review-{sha}-verified", 'Codex review of `' + sha + '`\n```json\n' + json.dumps(value, indent=2) + '\n```\n\nHost command results (full receipts retained locally):\n```json\n' + json.dumps(proof, indent=2) + '\n```')
                     run['review'], run['review_sha'] = value, sha
                     if not value['passed']:
                         self.repair(run, value)
