@@ -45,6 +45,8 @@ def run_summary(run, config=None):
     developer = run.get('developer', {})
     if developer.get('summary'):
         lines.append('Development: ' + developer['summary'])
+    if run.get('fixer', {}).get('summary'):
+        lines.append('Repair specialist (Sol): ' + run['fixer']['summary'])
     for key, label in (('qa', 'QA'), ('review', 'Codex review')):
         value = run.get(key) or {}
         if value:
@@ -93,6 +95,13 @@ def doctor(root, cfg):
     check('git', lambda: command(['git', '--version'], root).strip())
     check('remote', lambda: git_command(['ls-remote', 'origin'], root).strip())
     check('codex_login', lambda: command([cfg['codex'], 'login', 'status'], root).strip())
+    if cfg.get('repair_agent', {}).get('enabled'):
+        def repair_settings():
+            settings = cfg['repair_agent']
+            if not settings.get('model') or settings.get('reasoning_effort') not in ('low', 'medium', 'high', 'xhigh'):
+                raise ValueError('Configure repair_agent.model and repair_agent.reasoning_effort')
+            return settings
+        check('repair_agent', repair_settings)
     def godot():
         version = command([cfg['godot'], '--version'], root).strip()
         if not version.startswith(cfg['godot_version'] + '.'):

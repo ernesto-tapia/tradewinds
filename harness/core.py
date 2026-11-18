@@ -303,7 +303,7 @@ class Ollama:
             tools.log({'role': role, 'report': value})
             return value
         for _ in range(cfg["limits"]["turns"]):
-            payload = {"model": cfg["ollama"][role], "messages": messages, "stream": False,
+            payload = {"model": model, "messages": messages, "stream": False,
                        "options": {"temperature": 0, "num_ctx": cfg["ollama"]["context"],
                                    "num_predict": cfg['ollama'].get('max_output_tokens', 2048)}}
             payload['format' if structured else 'tools'] = ACTION_SCHEMA if structured else TOOLS

@@ -13,6 +13,92 @@ from harness.cli import resolve_codex, run_summary
 
 
 class HarnessTests(unittest.TestCase):
+    def enable_repair_specialist(self):
+        self.cfg['repair_agent'] = {'enabled': True, 'model': 'gpt-6.1-sol', 'reasoning_effort': 'medium'}
+
+    def test_failed_qa_goes_through_fixer_then_fresh_qa(self):
+        workflow, _ = self.workflow()
+        self.enable_repair_specialist()
+        failed = {'passed': False, 'summary': 'missing voyage assertions', 'gaps': ['restore midpoint coverage']}
+        passed = {'passed': True, 'summary': 'fixed and checked', 'gaps': []}
+        workflow.agent = Mock(side_effect=[failed, passed, passed])
+        workflow.commit = Mock(return_value='new-head')
+        run = workflow.advance(self.run_data('qa'), stop_before='publish')
+        self.assertEqual([call.args[1] for call in workflow.agent.call_args_list], ['qa', 'fixer', 'qa'])
+        self.assertEqual(run['stage'], 'publish')
+        self.assertEqual(run['qa_sha'], 'new-head')
+        self.assertEqual(run['repairs'], 1)
+
+    def test_fixer_uses_codex_directly_and_developer_scope(self):
+        workflow, _ = self.workflow()
+        self.enable_repair_specialist()
+        run = self.run_data('fix')
+        run['task'] = {'fields': {'summary': 'Current story'}}
+        run['feedback'] = [{'summary': 'failed', 'gaps': ['restore assertions']}]
+        with patch('harness.workflow.agent_client') as factory:
+            workflow.agent(run, 'fixer')
+        cfg = factory.call_args.args[0]
+        self.assertEqual(cfg['agents']['provider'], 'codex')
+        self.assertEqual(cfg['agents']['model'], 'gpt-6.1-sol')
+        self.assertEqual(cfg['agents']['reasoning_effort'], 'medium')
+        self.assertEqual(cfg['permissions']['fixer'], self.cfg['permissions']['developer'])
+        self.assertEqual(factory.return_value.run.call_args.args[1]['repair_findings'], run['feedback'])
+        workflow.ollama.run.assert_not_called()
+        self.assertNotIn('fixer', self.cfg['permissions'])
+
+    def test_fixer_action_loop_never_calls_ollama(self):
+        prompts = self.root / 'prompts'
+        prompts.mkdir()
+        (prompts / 'fixer.md').write_text('Fix the supplied findings')
+        self.cfg['agents'] = {'provider': 'codex', 'model': 'gpt-6.1-sol', 'reasoning_effort': 'medium'}
+        self.cfg['permissions']['fixer'] = ['game/']
+        responses = [
+            {'message': {'role': 'assistant', 'content': json.dumps({'action': 'finish', 'arguments': {}})}},
+            {'message': {'role': 'assistant', 'content': json.dumps({'passed': True, 'summary': 'verified', 'evidence': [], 'gaps': []})}}
+        ]
+        client = CodexActions(self.cfg, prompts)
+        with patch.object(client, 'chat', side_effect=responses), patch('harness.core.request') as ollama, patch('harness.core.command', return_value='actual check output'):
+            result = client.run('fixer', {}, Tools(self.root, 'fixer', self.cfg, lambda _: None))
+        self.assertTrue(result['passed'])
+        ollama.assert_not_called()
+
+    def test_fixer_preserves_bounded_repairs(self):
+        workflow, _ = self.workflow()
+        self.enable_repair_specialist()
+        run = self.run_data('qa')
+        failed = {'passed': False, 'summary': 'still broken', 'gaps': ['error']}
+        workflow.repair(run, failed)
+        workflow.agent = Mock(return_value=failed)
+        result = workflow.advance(run)
+        self.assertEqual(result['stage'], 'exhausted')
+        self.assertEqual(result['repairs'], 3)
+        self.assertEqual(workflow.agent.call_count, 3)
+        self.assertTrue(all(call.args[1] == 'fixer' for call in workflow.agent.call_args_list))
+
+    def test_failed_codex_review_routes_to_fixer_and_clears_approval(self):
+        workflow, _ = self.workflow()
+        self.enable_repair_specialist()
+        run = self.run_data('review')
+        workflow.git = Mock(side_effect=lambda *args, **kwargs: 'abc' if args[0] == 'rev-parse' else '')
+        workflow.github.pr.return_value = {'merged': False, 'state': 'open', 'head': {'sha': 'abc'}}
+        workflow.codex.review.return_value = {'passed': False, 'gaps': ['restore executable coverage']}
+        result = workflow.advance(run, stop_before='fix')
+        self.assertEqual(result['stage'], 'fix')
+        self.assertNotIn('review_sha', result)
+        self.assertNotIn('qa_sha', result)
+        self.assertIn('review_validation', result['repair_context'])
+
+    def test_retry_starts_specialist_and_keeps_old_findings(self):
+        workflow, _ = self.workflow()
+        self.enable_repair_specialist()
+        run = self.run_data('exhausted')
+        run.update(repairs=3, task={'fields': {'summary': 'Story'}}, feedback=[{'gaps': ['missing check']}])
+        workflow.retry(run)
+        self.assertEqual(run['stage'], 'fix')
+        with patch('harness.workflow.agent_client') as factory:
+            workflow.agent(run, 'fixer')
+        self.assertEqual(factory.return_value.run.call_args.args[1]['repair_findings'], [{'gaps': ['missing check']}])
+
     def test_summary_distinguishes_pending_checks_and_stale_qa(self):
         run = {'key': 'KAN-9', 'stage': 'waiting_merge', 'sha': 'current',
                'qa': {'passed': True}, 'qa_sha': 'current',

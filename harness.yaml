@@ -25,6 +25,10 @@ ollama:
   qa: qwen2.5-coder:7b
   context: 8192
   max_output_tokens: 2048
+repair_agent:
+  enabled: true
+  model: gpt-6.1-sol
+  reasoning_effort: medium
 limits:
   repairs: 3
   turns: 30

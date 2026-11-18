@@ -7,7 +7,7 @@ import subprocess
 import time
 import uuid
 
-from .core import Tools, command, git_command
+from .core import Tools, command, git_command, agent_client
 
 
 def plain_text(value):
@@ -56,12 +56,16 @@ class Workflow:
 
     def repair(self, run, feedback):
         run['feedback'].append(feedback)
+        run.setdefault('repair_context', {}).update({key: run[key] for key in
+            ('qa', 'review', 'review_validation') if key in run})
         run.pop('error', None)
         if run['repairs'] >= self.config['limits']['repairs']:
             run['stage'] = 'exhausted'
         else:
             run['repairs'] += 1
-            run['stage'] = 'develop'
+            run['stage'] = 'fix' if self.config.get('repair_agent', {}).get('enabled', False) else 'develop'
+        for key in ('qa_sha', 'review_sha', 'review_validation', 'checks_pass', 'visual_observation'):
+            run.pop(key, None)
         self.store.save(run)
 
     def retry(self, run):
@@ -69,9 +73,10 @@ class Workflow:
             raise ValueError('--retry applies only to an exhausted run')
         run.setdefault('retry_history', []).append({
             'repairs': run['repairs'], 'feedback': run['feedback'],
-            'developer': run.get('developer'), 'qa': run.get('qa'), 'review': run.get('review'), 'time': time.time()})
-        run.update(stage='develop', repairs=0, feedback=[])
-        for key in ('developer', 'qa', 'review', 'qa_sha', 'review_sha'):
+            'developer': run.get('developer'), 'fixer': run.get('fixer'), 'qa': run.get('qa'), 'review': run.get('review'), 'time': time.time()})
+        stage = 'fix' if self.config.get('repair_agent', {}).get('enabled', False) else 'develop'
+        run.update(stage=stage, repairs=0, feedback=[])
+        for key in ('developer', 'fixer', 'qa', 'review', 'qa_sha', 'review_sha', 'review_validation'):
             run.pop(key, None)
         run.pop('error', None)
         self.store.save(run)
@@ -163,6 +168,11 @@ class Workflow:
             elif 'fallback' in value:
                 print(f"  {label}: local attempt failed; switching to {value['fallback']}", flush=True)
         cfg = self.story_config(run)
+        if role == 'fixer':
+            settings = cfg['repair_agent']
+            cfg.setdefault('agents', {}).update(provider='codex', model=settings['model'],
+                                                reasoning_effort=settings['reasoning_effort'])
+            cfg['permissions']['fixer'] = list(cfg['permissions']['developer'])
         tools = Tools(run['worktree'], role, cfg, log)
         fields = run['task']['fields']
         files = tools.call('list_files', {})
@@ -186,6 +196,10 @@ class Workflow:
             if not path.is_relative_to(self.root):
                 raise PermissionError('Story guidance must be within the workspace')
             task['current_story_guidance'] = path.read_text(encoding='utf-8')
+        if role == 'fixer':
+            task['repair_findings'] = run['feedback'] or (run.get('retry_history') or [{}])[-1].get('feedback', [])
+            task['previous_validation'] = run.get('review_validation') or run.get('repair_context', {}).get('review_validation')
+            return agent_client(cfg, self.root / 'prompts').run(role, task, tools)
         return self.ollama.run(role, task, tools)
 
     def commit(self, run):
@@ -273,12 +287,13 @@ class Workflow:
                     self.jira.transition(run['key'], 'developing')
                     run.setdefault('base_sha', self.git('rev-parse', 'HEAD', cwd=cwd))
                     run['stage'] = 'develop'
-                elif stage == 'develop':
+                elif stage in ('develop', 'fix'):
                     if self.jira is not None:
                         self.jira.transition(run['key'], 'developing')
-                    run['developer'] = self.agent(run, 'developer')
-                    if not run['developer']['passed']:
-                        self.repair(run, run['developer'])
+                    role = 'fixer' if stage == 'fix' else 'developer'
+                    run[role] = self.agent(run, role)
+                    if not run[role]['passed']:
+                        self.repair(run, run[role])
                         continue
                     if not self.has_feature_changes(run):
                         self.repair(run, self.no_changes(run))
@@ -445,7 +460,7 @@ class Workflow:
         run.pop('qa_sha', None)
 
     def watch(self, once=False):
-        watched_stages = ('waiting_merge', 'review', 'assess', 'complete')
+        watched_stages = ('waiting_merge', 'review', 'assess', 'complete', 'fix')
         while True:
             for run in self.store.all():
                 if run['stage'] in watched_stages:
