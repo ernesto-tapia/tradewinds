@@ -1,5 +1,15 @@
 # Caribbean Tradewinds
 
+## Current menu layout (KAN-24)
+
+The header shows coins and cargo capacity once. The right-hand navigation opens one panel at a time: Market, Contracts, or Cargo. Contracts have a full-width panel instead of a narrow scrolling column. The map remains visible on the left.
+
+The commodity chooser is a text-only Button opening a shared-theme flat PanelContainer with text choices. It replaces transaction details while open, rather than using a native OptionButton arrow or default popup. Enter selects a commodity and returns focus to the chooser; Escape closes without changing the selection. The shared Theme also defines flat PopupMenu/PopupPanel styles. Opened chooser bounds, choice visibility, keyboard selection, Escape, and icon absence are checked at both target resolutions.
+
+Dock at a port, then click Trade or the Market tab. Use the commodity chooser to view Sugar, Rum, or Coffee; only the selected commodity's stock, owned quantity, and transaction buttons are shown. Bulk-price details are available in the chooser tooltip. Cargo quantities live in the Cargo tab. Contract acceptance and delivery remain in Contracts. At sea, market transactions remain unavailable.
+
+Playtest the exported build at 1280x720 and 1920x1080. Check tab switching, commodity selection, keyboard focus, buying/selling, cargo refresh, and contract acceptance/delivery. The automated theme check covers tab exclusivity, keyboard activation, single-commodity visibility, and panel bounds; human visual approval is still required before merge.
+
 Open `game/project.godot` in Godot 4.5.1 and run the main scene.
 
 The bounded 1000 × 600 ocean map contains two labeled islands, Port A, Port B, and a ship. All visuals use flat rectangles, interior labels, and built-in fonts.
