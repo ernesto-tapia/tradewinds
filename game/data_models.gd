@@ -63,8 +63,7 @@ class Market:
         return clampi(int(base_prices[good_id]) + scarcity, int(minimum_prices[good_id]), int(maximum_prices[good_id]))
     func refresh_price(good_id: String) -> void:
         prices[good_id] = price_at_stock(good_id, int(inventory[good_id]))
-    # Each unit traverses the same price step in either direction. Selling
-    # receives the quote after adding supply, preventing round-trip profit.
+    # Selling receives the quote after adding supply, preventing round-trip profit.
     func trade_total(good_id: String, quantity: int, purchasing: bool) -> int:
         var stock: int = int(inventory[good_id])
         var total: int = 0
@@ -91,7 +90,14 @@ class Voyage:
     var progress: float = 0.0
     var remaining_time: float = 0.0
     var active: bool = false
+    var provisions_consumed: int = 0
 
+const PROVISION_PRICE: int = 2
+const DISTANCE_PER_PROVISION: float = 100.0
+# Three port-to-port legs of starter supplies support the repeatable delivery demo.
+# Supplies are separate from trade cargo and never occupy the commodity hold.
+var provisions: int = 12
+var departure_feedback: String = "Choose a port to see required provisions."
 var ports: Dictionary = {}
 var goods: Dictionary = {}
 var markets: Dictionary = {}
@@ -126,6 +132,22 @@ func _init() -> void:
 func can_trade() -> bool:
     return not voyage.active and markets.has(docked_port_id)
 
+func required_provisions(destination_id: String) -> int:
+    if not ports.has(destination_id) or destination_id == docked_port_id:
+        return 0
+    var destination: Port = ports[destination_id]
+    return ceili(ship.position.distance_to(destination.position) / DISTANCE_PER_PROVISION)
+
+func buy_provisions(quantity: int) -> bool:
+    if not can_trade() or quantity <= 0:
+        return false
+    # Divide before multiplying so oversized requests reject without overflow.
+    if quantity > wallet.coins / PROVISION_PRICE:
+        return false
+    wallet.coins -= quantity * PROVISION_PRICE
+    provisions += quantity
+    return true
+
 # Validate the entire marginal-price batch before changing any state.
 func buy(good_id: String, quantity: int) -> bool:
     if not can_trade() or not goods.has(good_id) or quantity <= 0:
@@ -152,7 +174,7 @@ func sell(good_id: String, quantity: int) -> bool:
     var proceeds: int = market.trade_total(good_id, quantity, false)
     cargo.quantities[good_id] = cargo.quantity(good_id) - quantity
     wallet.coins += proceeds
-    market.inventory[good_id] = int(market.inventory[good_id]) + quantity
+    market.inventory[good_id] = int(market.inventory.get(good_id, 0)) + quantity
     market.refresh_price(good_id)
     return true
 
@@ -179,11 +201,24 @@ func sell_all(good_id: String) -> bool:
     return sell(good_id, cargo.quantity(good_id))
 
 func start_voyage(destination_id: String) -> bool:
-    if voyage.active or not ports.has(destination_id):
+    if voyage.active:
+        departure_feedback = "Already sailing; supplies were charged at departure."
+        return false
+    if not ports.has(destination_id):
+        departure_feedback = "Unknown destination."
         return false
     if destination_id == docked_port_id:
+        departure_feedback = "Already docked at %s; requires 0 provisions." % destination_id
+        return false
+    var required: int = required_provisions(destination_id)
+    if provisions < required:
+        departure_feedback = "Cannot depart to %s: requires %d provisions; aboard %d. Buy at dock." % [destination_id, required, provisions]
         return false
     var destination: Port = ports[destination_id]
+    # Commit supplies and voyage together only after all departure gates pass.
+    provisions -= required
+    voyage.provisions_consumed = required
+    departure_feedback = "Departure to %s requires %d provisions; consumed %d." % [destination_id, required, required]
     voyage.origin_id = docked_port_id
     voyage.destination_id = destination_id
     voyage.distance = ship.position.distance_to(destination.position)
