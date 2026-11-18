@@ -27,6 +27,10 @@ var active_menu: String = "contracts"
 var selected_good: String = "sugar"
 var commodity_sections: Dictionary = {}
 var menu_buttons: Dictionary = {}
+var commodity_selector: Button
+var commodity_chooser: PanelContainer
+var commodity_content: VBoxContainer
+var commodity_choices: Dictionary = {}
 
 func box(id: String, at: Vector2, dimensions: Vector2, tint: Color, text: String, parent: Node = self) -> ColorRect:
     var control := ColorRect.new()
@@ -120,16 +124,18 @@ func _build_market() -> void:
     var column := UI.column(market_panel)
     UI.label(column, "Port market", "Heading")
     market_title = UI.label(column, "Dock to open market")
-    var selector := OptionButton.new()
-    selector.name = "CommoditySelector"
-    selector.custom_minimum_size.y = 48
-    selector.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+    commodity_selector = UI.button(column, "CommoditySelector", "Sugar — Change commodity", toggle_commodity_chooser)
+    commodity_chooser = PanelContainer.new()
+    commodity_chooser.name = "CommodityChooser"
+    commodity_chooser.theme = UI.DEMO_THEME
+    column.add_child(commodity_chooser)
+    var choices := UI.column(commodity_chooser)
+    UI.label(choices, "Choose a commodity")
     for good_id in game_state.goods:
-        selector.add_item(game_state.goods[good_id].name)
-        selector.set_item_metadata(selector.item_count - 1, good_id)
-    selector.item_selected.connect(func(index: int): select_commodity(str(selector.get_item_metadata(index))))
-    column.add_child(selector)
+        commodity_choices[good_id] = UI.button(choices, "Choose_" + good_id, game_state.goods[good_id].name, select_commodity.bind(good_id))
+    commodity_chooser.hide()
     var content := UI.scroll_column(column)
+    commodity_content = content
     for good_id in game_state.goods:
         var section := PanelContainer.new()
         section.name = "Row_" + good_id
@@ -150,14 +156,34 @@ func _build_market() -> void:
         sell_buttons[good_id] = UI.button(actions, "Sell_" + good_id, "Sell 1", _transaction.bind(good_id, false, false))
         sell_all_buttons[good_id] = UI.button(actions, "SellAll_" + good_id, "Sell all", _transaction.bind(good_id, false, true))
         actions.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-    selector.tooltip_text = "Prices change after each unit traded. Bulk buttons show the total."
+    commodity_selector.tooltip_text = "Prices change after each unit traded. Bulk buttons show the total."
+
+func toggle_commodity_chooser() -> void:
+    var opened := not commodity_chooser.visible
+    commodity_chooser.visible = opened
+    commodity_content.get_parent().visible = not opened
+    if opened:
+        commodity_choices[selected_good].grab_focus()
+
+func _unhandled_key_input(event: InputEvent) -> void:
+    if event.is_action_pressed("ui_cancel") and commodity_chooser.is_visible_in_tree():
+        toggle_commodity_chooser()
+        commodity_selector.grab_focus()
+        get_viewport().set_input_as_handled()
 
 func select_commodity(good_id: String) -> void:
     selected_good = good_id
+    commodity_selector.text = game_state.goods[good_id].name + " — Change commodity"
+    commodity_chooser.hide()
+    commodity_content.get_parent().show()
+    if commodity_selector.is_visible_in_tree():
+        commodity_selector.grab_focus()
     for key in commodity_sections:
         commodity_sections[key].visible = key == good_id
 
 func show_menu(menu: String) -> void:
+    commodity_chooser.hide()
+    commodity_content.get_parent().show()
     active_menu = menu
     for key in menu_buttons:
         menu_buttons[key].button_pressed = key == menu

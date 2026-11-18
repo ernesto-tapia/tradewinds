@@ -55,6 +55,9 @@ func check_theme() -> void:
         buttons.append(game.buy_all_buttons[good_id])
         buttons.append(game.sell_buttons[good_id])
         buttons.append(game.sell_all_buttons[good_id])
+    buttons.append(game.commodity_selector)
+    for choice in game.commodity_choices.values():
+        buttons.append(choice)
     for button in buttons:
         require_condition(button.focus_mode == Control.FOCUS_ALL, button.name + " must support keyboard focus")
         var styles: Array[StyleBox] = []
@@ -121,6 +124,29 @@ func check_theme() -> void:
             var panel_id: String = {"contracts": "ContractPanel", "cargo": "Economy", "market": "Market"}[menu]
             var detail: Control = game.get_node(panel_id)
             require_condition(bounds.encloses(detail.get_global_rect()), menu + " content must fit when opened")
+        require_condition(not game.commodity_selector is OptionButton and game.commodity_selector.icon == null, "chooser must be a text-only button with no native arrow")
+        require_condition(UI.DEMO_THEME.get_stylebox("panel", "PopupMenu") is StyleBoxFlat, "PopupMenu must have shared flat panel styling")
+        require_condition(UI.DEMO_THEME.get_stylebox("hover", "PopupMenu") is StyleBoxFlat, "PopupMenu must have shared flat hover styling")
+        await activate(viewport, game.commodity_selector)
+        await get_tree().process_frame
+        require_condition(game.commodity_chooser.is_visible_in_tree(), "Enter must open the chooser")
+        require_condition(game.commodity_chooser.theme == UI.DEMO_THEME, "opened chooser must use shared theme")
+        require_condition(not game.commodity_content.is_visible_in_tree(), "opened chooser must replace transaction details")
+        require_condition(game.market_panel.get_global_rect().encloses(game.commodity_chooser.get_global_rect()), "opened chooser must fit inside market")
+        for choice in game.commodity_choices.values():
+            require_condition(choice.icon == null and choice.is_visible_in_tree(), "choices must be visible text-only buttons")
+            require_condition(bounds.encloses(choice.get_global_rect()), "opened choice must fit viewport")
+        await activate(viewport, game.commodity_choices["coffee"])
+        require_condition(game.selected_good == "coffee" and not game.commodity_chooser.visible, "Enter must select commodity and close chooser")
+        require_condition(viewport.gui_get_focus_owner() == game.commodity_selector, "selection must restore chooser focus")
+        await activate(viewport, game.commodity_selector)
+        for down in [true, false]:
+            var escape := InputEventKey.new()
+            escape.keycode = KEY_ESCAPE
+            escape.pressed = down
+            viewport.push_input(escape, true)
+        require_condition(not game.commodity_chooser.visible and game.selected_good == "coffee", "Escape must close without changing selection")
+        game.select_commodity("sugar")
     host.queue_free()
     if not failed:
-        print("KAN-24 theme passed: shared panel resources; five distinct button states; Enter activation of Trade at sea and docked; disabled sale rejection; Tab navigation; exclusive Market/Contracts/Cargo tabs; selected commodity only; opened panel bounds at 1280x720 and 1920x1080. Human visual approval remains pending.")
+        print("KAN-24 theme passed: shared panels and flat popup styles; five button states; keyboard Trade and tab navigation; disabled sale rejection; exclusive menu tabs; text-only opened chooser, commodity selection, Escape and focus restoration; opened bounds at 1280x720 and 1920x1080. Human visual approval remains pending.")
