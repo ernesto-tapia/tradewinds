@@ -1,49 +1,49 @@
 extends Node
 
 const UI = preload("res://ui/menu_ui.gd")
-var supplies: Label
-var routes: Label
+var buy_button: Button
 var feedback: Label
-var purchase: Button
-var last_departure_feedback: String = ""
+var balance_label: Label
+var route_label: Label
+var panel: PanelContainer
+var game_state
 
 func _ready() -> void:
-    # Parent builds the map and wallet before this deferred UI construction.
-    call_deferred("build_panel")
+    game_state = get_parent().game_state
+    call_deferred("build_board")
 
-func build_panel() -> void:
-    var panel := UI.panel(get_parent(), "ProvisionsPanel", Vector2(10, 540), Vector2(690, 170))
-    var content := UI.column(panel)
-    var row := UI.row(content)
-    supplies = UI.label(row, "Provisions")
-    purchase = UI.button(row, "BuyProvisions", "Buy 1 provision · 2 coins", buy_one)
-    routes = UI.label(content, "")
-    feedback = UI.label(content, "Buy provisions at either dock. Each 100 route units costs 1, rounded up.")
-    refresh()
-
-func buy_one() -> void:
+func build_board() -> void:
     var main = get_parent()
-    var accepted: bool = main.game_state.buy_provisions(1)
-    UI.status(feedback, "Purchased 1 provision for 2 coins." if accepted else "Requires docking and 2 coins.", not accepted)
-    main.refresh_market()
-    refresh()
+    panel = UI.panel(main, "ProvisioningPanel", Vector2(10, 536), Vector2(690, 174))
+    var content := UI.scroll_column(panel)
+    UI.label(content, "Provisions · 2 coins each", "Heading")
+    balance_label = UI.label(content, "")
+    route_label = UI.label(content, "")
+    buy_button = UI.button(content, "BuyProvisions", "Buy 4 provisions for 8 coins", buy_provisions, true)
+    feedback = UI.label(content, "Dock at either port to purchase supplies.")
+    refresh_provisioning()
+
+func buy_provisions() -> bool:
+    var bought: bool = game_state.buy_provisions(4)
+    var message := "Bought 4 provisions for 8 coins."
+    if not bought:
+        message = "Dock at a port to buy provisions." if not game_state.can_trade() else "Requires 8 coins to buy 4 provisions."
+    UI.status(feedback, message, not bought)
+    get_parent().refresh_market()
+    get_parent().refresh_route_requirements()
+    if bought:
+        get_parent().refresh_voyage()
+    refresh_provisioning()
+    return bought
 
 func _process(_delta: float) -> void:
-    if is_instance_valid(supplies):
-        refresh()
+    if is_instance_valid(buy_button):
+        refresh_provisioning()
 
-func refresh() -> void:
-    var state = get_parent().game_state
-    supplies.text = "Provisions aboard: %d" % state.provisions
-    purchase.disabled = not state.can_trade() or state.wallet.coins < state.PROVISION_PRICE
-    if state.voyage.active:
-        routes.text = "This voyage consumed %d provisions at departure." % state.voyage.provisions_consumed
+func refresh_provisioning() -> void:
+    balance_label.text = "Balance: %d provisions, %d coins" % [game_state.provisions, game_state.wallet.coins]
+    if game_state.voyage.active:
+        route_label.text = "Consumed at departure: %d provisions. No further charge during sailing." % game_state.voyage.provisions_consumed
     else:
-        var quotes: PackedStringArray = []
-        for port_id in state.ports:
-            if port_id != state.docked_port_id:
-                quotes.append("%s requires %d" % [port_id, state.required_provisions(port_id)])
-        routes.text = "Departure provisions: " + " · ".join(quotes)
-    if state.departure_feedback != last_departure_feedback:
-        last_departure_feedback = state.departure_feedback
-        UI.status(feedback, last_departure_feedback, last_departure_feedback.begins_with("Cannot"))
+        route_label.text = "Required: Port A %d · Port B %d provisions" % [game_state.required_provisions("Port A"), game_state.required_provisions("Port B")]
+    buy_button.disabled = not game_state.can_trade() or game_state.wallet.coins < 8

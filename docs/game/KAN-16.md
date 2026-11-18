@@ -1,18 +1,18 @@
 # KAN-16 — Voyage provisioning and consumption
 
-Implemented dock purchases at either port for 2 coins per provision, using a reserve separate from commodity cargo. The demo starts with 12 provisions. Routes consume ceil(distance / 100) provisions once at departure; Port A to Port B requires 4. Insufficient supplies block departure without changing voyage or resource state. The provisions panel shows supplies aboard, route requirements, purchase controls and departure feedback.
+Supplies use the running game's reserve and remain separate from commodity cargo. Dock purchases add four provisions for eight coins. The HUD, provisioning panel, and destination tooltip show required supplies; rejected departures show required and available amounts. Provision cost is ceil(distance / 100), charged once at departure.
 
-Added headless provisioning checks covering dock-only purchases, invalid and unaffordable purchases, separate cargo capacity, insufficient-supply rejection, required-amount feedback, exact supply consumption, repeated-departure rejection, no additional consumption during sailing or arrival, destination resupply, return voyages and distance rounding boundaries.
+## Executable acceptance coverage
 
-Fixed the existing voyage adapter's scene construction error and replaced its simulated contract mutations with calls to the real voyage state.
+`game/provisioning_check.gd` is attached to the main scene and automatically schedules its checks in headless mode. It creates an isolated real game and provisioning panel in a SubViewport, then sends actual mouse events to the port controls.
 
-Observed command results using Godot 4.5.1:
+- Docking enables purchases; buying supplies adds exactly four and deducts eight coins.
+- The real Port A-to-B route requires four provisions; the panel displays A=0/B=4, and the HUD and destination tooltip show the required amount before departure.
+- Zero and three provisions reject the port click, preserve position, docking, reserves, money, cargo and voyage state, and display required/available amounts.
+- Exactly four provisions allow sailing and leave zero, with four consumed displayed in the HUD and provisioning panel.
+- Repeated departure, midpoint advancement and arrival do not charge again.
+- Independent fixed-distance fixtures require 1, 2 and 3 provisions for 100, 100.1 and 250 units respectively.
 
-- validate: passed after final code changes.
-- scene: passed, including the KAN-16 provisioning assertions and existing economy and contract assertions.
-- smoke: passed, including provisioning, economy, contracts, contract UI and theme checks.
-- export: passed; the exported executable smoke test also passed the provisioning and existing checks.
+The success marker is `KAN-16 provisioning acceptance passed:` and is emitted only after all assertions finish. Failures log `KAN-16 provisioning:` and terminate with exit 1. The configured smoke and exported-executable smoke checks execute it, alongside economy, contract, contract UI and theme checks.
 
-An earlier scene run failed on the voyage adapter constructor and a repeat contract departure exhausting starter supplies. Both failures were corrected before the successful checks above.
-
-No rendered visual inspection is claimed. Human visual approval and PR merge remain pending; the story is not marked Done.
+Validation and full command receipts are recorded by the host for the exact committed head in `.runs/907cf6afd710/validation-<full-sha>.json`; those receipts, rather than this document, establish commit attribution, actual output and exit status. Separate disposable mutation checks confirmed that removing the shortage guard and rounding costs down each produce exit 1. Human visual approval remains separate.

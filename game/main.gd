@@ -81,11 +81,10 @@ func _ready() -> void:
     ship.add_to_group("player_ship")
     ship.set_meta("selected", false)
     ship.gui_input.connect(_ship_input)
-    var destination := UI.panel(self, "Destination", Vector2(10, 68), Vector2(690, 48))
+    var destination := UI.panel(self, "Destination", Vector2(10, 68), Vector2(690, 92))
     destination_feedback = UI.label(destination, "Choose Port A or Port B to sail")
     destination_feedback.add_to_group("destination_feedback")
-    # Keep this permission query available at sea so keyboard and mouse users
-    # receive the same rejection feedback. Transactions retain their own gates.
+    # This permission query stays available at sea; transactions enforce docking.
     trade_button = UI.button(self, "Trade", "", open_trade, true)
     trade_button.theme = UI.DEMO_THEME
     trade_button.position = Vector2(220, 470)
@@ -118,6 +117,7 @@ func _ready() -> void:
     _build_market()
     set_meta("at_sea", true)
     refresh_market()
+    refresh_route_requirements()
 
 func _build_market() -> void:
     market_panel = UI.panel(self, "Market", Vector2(710, 126), Vector2(560, 584))
@@ -219,12 +219,10 @@ func _transaction_input(event: InputEvent, good_id: String, purchasing: bool, al
         _transaction(good_id, purchasing, all_units)
 
 func sail_to(port: Control) -> void:
-    if game_state.can_trade() and str(port.name) == game_state.docked_port_id:
-        voyage_time = 0.0
-        refresh_voyage()
-        refresh_market()
-        return
-    if not game_state.start_voyage(str(port.name)):
+    var accepted: bool = game_state.start_voyage(str(port.name))
+    if not accepted:
+        UI.status(destination_feedback, game_state.departure_feedback, true)
+        refresh_provisioning_panel()
         return
     voyage_time = game_state.voyage.duration
     set_meta("destination_id", str(port.name))
@@ -238,6 +236,7 @@ func sail_to(port: Control) -> void:
         set_meta("at_sea", false)
     refresh_voyage()
     refresh_market()
+    refresh_provisioning_panel()
 
 func _process(delta: float) -> void:
     if game_state.voyage.active:
@@ -248,15 +247,29 @@ func _process(delta: float) -> void:
             current_destination = null
             set_meta("at_sea", false)
             refresh_market()
+            refresh_provisioning_panel()
+
+func refresh_route_requirements() -> void:
+    for port_id in game_state.ports:
+        var port := get_node_or_null(NodePath(port_id)) as Control
+        if port != null:
+            port.tooltip_text = "%s requires %d provisions; aboard %d. Supplies cost 2 coins each at dock." % [port_id, game_state.required_provisions(port_id), game_state.provisions]
+
+func refresh_provisioning_panel() -> void:
+    refresh_route_requirements()
+    var provisioning := get_node_or_null("Provisioning")
+    if provisioning != null and is_instance_valid(provisioning.buy_button):
+        provisioning.refresh_provisioning()
 
 func refresh_voyage() -> void:
     ship.position = game_state.ship.position
     voyage_progress = game_state.voyage.progress
     remaining_time = game_state.voyage.remaining_time
     if game_state.voyage.active:
-        destination_feedback.text = "Sailing to %s: %d%% | %.1f seconds remaining" % [game_state.voyage.destination_id, roundi(voyage_progress * 100.0), remaining_time]
+        UI.status(destination_feedback, "Sailing to %s: %d%% | %.1f seconds remaining\n%s" % [game_state.voyage.destination_id, roundi(voyage_progress * 100.0), remaining_time, game_state.departure_feedback])
     else:
-        destination_feedback.text = "Docked at %s · Select a port to sail" % game_state.docked_port_id
+        UI.status(destination_feedback, "Docked at %s · Aboard: %d provisions\nPort A requires %d; Port B requires %d provisions." % [game_state.docked_port_id, game_state.provisions, game_state.required_provisions("Port A"), game_state.required_provisions("Port B")])
+    refresh_route_requirements()
 
 func can_trade() -> bool:
     return game_state.can_trade()

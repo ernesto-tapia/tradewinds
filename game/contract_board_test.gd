@@ -2,6 +2,7 @@ extends Node
 
 const Main = preload("res://main.gd")
 const Board = preload("res://contract_board.gd")
+const Provisioning = preload("res://provisioning.gd")
 
 func _ready() -> void:
     if DisplayServer.get_name() == "headless":
@@ -14,23 +15,33 @@ func require_condition(value: bool, message: String) -> bool:
     return value
 
 func run_checks() -> void:
-    # Use an isolated real game parent so fixtures cannot change other checks.
     var game = Main.new()
     add_child(game)
     game.set_process(false)
     var board = Board.new()
     game.add_child(board)
+    var supplies = Provisioning.new()
+    game.add_child(supplies)
     await get_tree().process_frame
     await get_tree().process_frame
     board.set_process(false)
     if not require_condition(board.delivery != null and board.accept_button.disabled and board.complete_button.disabled, "board builds with a game parent and blocks actions at sea"):
+        return
+    if not require_condition(supplies.buy_button.disabled, "provision purchases are disabled at sea"):
         return
     if not require_condition(not board.get_contract_data().active and board.get_contract_data().completed_count == 0, "initial offer is inactive"):
         return
     game.sail_to(game.get_node("Port A"))
     game._process(game.voyage_time + 1.0)
     board.refresh_contract()
+    supplies.refresh_provisioning()
     if not require_condition(not board.accept_button.disabled and board.accept_button.visible and not board.complete_button.visible, "origin docking enables the offer"):
+        return
+    if not require_condition(not supplies.buy_button.disabled, "docking enables provision purchases"):
+        return
+    var purchase_coins: int = game.game_state.wallet.coins
+    var purchase_balance: int = game.game_state.provisions
+    if not require_condition(supplies.buy_provisions() and game.game_state.provisions == purchase_balance + 4 and game.game_state.wallet.coins == purchase_coins - 8 and "Bought 4 provisions" in supplies.feedback.text, "dock purchase updates real resources and feedback"):
         return
     if not require_condition(board.accept_contract() and board.feedback.text == "Accepted: bring 3 Sugar to Port B." and board.get_contract_data().active, "acceptance updates feedback and active state"):
         return
@@ -54,4 +65,4 @@ func run_checks() -> void:
     if not require_condition(board.accept_button.visible and board.accept_button.disabled and not board.complete_button.visible and "Completed: 1" in board.details.text, "completed board displays the updated offer and count"):
         return
     game.queue_free()
-    print("KAN-24 contract UI passed: real game parent, initial offer, origin docking, acceptance feedback, cargo and destination gates, delivery feedback, exact cargo consumption and reward, completed controls")
+    print("KAN-24 contract UI passed: real game parent, initial offer, origin docking, acceptance feedback, cargo and destination gates, delivery feedback, exact cargo consumption and reward, completed controls; KAN-16 dock purchase resources and feedback")
