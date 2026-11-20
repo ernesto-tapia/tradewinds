@@ -35,11 +35,57 @@ class WindowsJob:
         self.handle = self.kernel.CreateJobObjectW(None, None)
         info = Extended()
         info.basic.flags = 0x2000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
-        if not self.handle or not self.kernel.SetInformationJobObject(self.handle, 9, ctypes.byref(info), ctypes.sizeof(info)) or not self.kernel.AssignProcessToJobObject(self.handle, int(process._handle)):
-            error = ctypes.get_last_error()
-            self.close()
-            process.kill()
-            raise OSError(error, 'Cannot establish Windows process-tree boundary')
+        operations = [
+            ('CreateJobObjectW', lambda: self.handle),
+            ('SetInformationJobObject', lambda: self.kernel.SetInformationJobObject(self.handle, 9, ctypes.byref(info), ctypes.sizeof(info))),
+            ('AssignProcessToJobObject', lambda: self.kernel.AssignProcessToJobObject(self.handle, int(process._handle))),
+        ]
+        for name, operation in operations:
+            if not operation():
+                error = ctypes.get_last_error()
+                self.close()
+                raise OSError(error, f'Cannot establish Windows process-tree boundary ({name})')
+
+    def resume(self, pid):
+        """Resume the primary thread only after its suspended process is in the job."""
+        import ctypes
+        from ctypes import wintypes
+        class ThreadEntry(ctypes.Structure):
+            _fields_ = [('size', wintypes.DWORD), ('usage', wintypes.DWORD),
+                        ('thread_id', wintypes.DWORD), ('process_id', wintypes.DWORD),
+                        ('base_priority', wintypes.LONG), ('delta_priority', wintypes.LONG),
+                        ('flags', wintypes.DWORD)]
+        kernel = self.kernel
+        kernel.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+        kernel.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+        kernel.Thread32First.argtypes = [wintypes.HANDLE, ctypes.POINTER(ThreadEntry)]
+        kernel.Thread32Next.argtypes = [wintypes.HANDLE, ctypes.POINTER(ThreadEntry)]
+        kernel.OpenThread.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel.OpenThread.restype = wintypes.HANDLE
+        kernel.ResumeThread.argtypes = [wintypes.HANDLE]
+        kernel.ResumeThread.restype = wintypes.DWORD
+        snapshot = kernel.CreateToolhelp32Snapshot(4, 0)  # TH32CS_SNAPTHREAD
+        if snapshot == ctypes.c_void_p(-1).value:
+            raise ctypes.WinError(ctypes.get_last_error())
+        try:
+            entry = ThreadEntry()
+            entry.size = ctypes.sizeof(entry)
+            found = kernel.Thread32First(snapshot, ctypes.byref(entry))
+            while found:
+                if entry.process_id == pid:
+                    thread = kernel.OpenThread(2, False, entry.thread_id)  # THREAD_SUSPEND_RESUME
+                    if not thread:
+                        raise ctypes.WinError(ctypes.get_last_error())
+                    try:
+                        if kernel.ResumeThread(thread) == 0xFFFFFFFF:
+                            raise ctypes.WinError(ctypes.get_last_error())
+                    finally:
+                        kernel.CloseHandle(thread)
+                    return
+                found = kernel.Thread32Next(snapshot, ctypes.byref(entry))
+            raise OSError('Suspended child primary thread was not found')
+        finally:
+            kernel.CloseHandle(snapshot)
 
     def close(self):
         if self.handle:
@@ -52,14 +98,20 @@ def run_process(args, cwd, timeout, env=None, input=None):
                                stdin=subprocess.PIPE if input is not None else subprocess.DEVNULL,
                                text=True, encoding='utf-8', errors='replace',
                                env=clean_env() if env is None else env,
+                               creationflags=0x4 if os.name == 'nt' else 0,  # CREATE_SUSPENDED
                                start_new_session=os.name != 'nt')
-    job = WindowsJob(process) if os.name == 'nt' else None
+    job = None
     try:
+        if os.name == 'nt':
+            job = WindowsJob(process)
+            job.resume(process.pid)
         stdout, stderr = process.communicate(input=input, timeout=timeout)
         return subprocess.CompletedProcess(args, process.returncode, stdout, stderr)
-    except (subprocess.TimeoutExpired, KeyboardInterrupt):
+    except BaseException:
         if job:
             job.close()
+        elif os.name == 'nt':
+            process.kill()
         else:
             import signal
             try:
