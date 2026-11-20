@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -9,6 +10,7 @@ from harness.core import Ollama, CodexActions, agent_client, Store, Tools, comma
 from harness.workflow import Workflow, plain_text
 from harness.integrations import GitHub, Jira, Codex
 from harness.core import request
+from harness.core import WindowsJob, run_process
 from harness.cli import resolve_codex, run_summary
 
 
@@ -255,6 +257,37 @@ class HarnessTests(unittest.TestCase):
         import sys
         with self.assertRaises(subprocess.TimeoutExpired):
             command([sys.executable, '-c', 'import time; time.sleep(2)'], self.root, timeout=0.05)
+
+    @unittest.skipUnless(os.name == 'nt', 'Windows Job Object lifecycle')
+    def test_windows_child_waits_until_job_boundary_is_established(self):
+        import sys
+        import time
+        marker = self.root / 'started.txt'
+        def establish(process):
+            time.sleep(0.1)
+            self.assertFalse(marker.exists(), 'Child must not execute before job assignment')
+            return WindowsJob(process)
+        with patch('harness.core.WindowsJob', side_effect=establish):
+            command([sys.executable, '-c', "from pathlib import Path; Path('started.txt').write_text('started')"], self.root)
+        self.assertTrue(marker.exists())
+
+    @unittest.skipUnless(os.name == 'nt', 'Windows Job Object lifecycle')
+    def test_windows_job_startup_failure_reaps_suspended_child(self):
+        import sys
+        children = []
+        def reject(process):
+            children.append(process)
+            raise OSError(5, 'fixture job assignment denied')
+        with patch('harness.core.WindowsJob', side_effect=reject), self.assertRaisesRegex(OSError, 'fixture job assignment denied'):
+            run_process([sys.executable, '-c', "from pathlib import Path; Path('unexpected.txt').touch()"], self.root, 2)
+        self.assertFalse((self.root / 'unexpected.txt').exists())
+        self.assertIsNotNone(children[0].poll())
+        self.assertTrue(children[0].stdout.closed)
+        self.assertTrue(children[0].stderr.closed)
+
+    def test_rapid_git_commands_complete(self):
+        for _ in range(25):
+            self.assertIn('git version', command(['git', '--version'], self.root))
 
     def test_state_survives_restart_and_lock(self):
         store = Store(self.root)
