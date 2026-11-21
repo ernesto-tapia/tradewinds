@@ -116,6 +116,25 @@ class HarnessTests(unittest.TestCase):
         self.assertNotIn('QA: passed', summary)
         self.assertIn('Blocker: Godot parse error', summary)
 
+    def test_approved_build_summary_includes_visual_test_command(self):
+        worktree = self.root / 'worktree'
+        (worktree / 'build').mkdir(parents=True)
+        (worktree / 'build/game.exe').touch()
+        run = {'id': 'run-123', 'key': 'KAN-16', 'stage': 'waiting_merge',
+               'worktree': str(worktree), 'sha': 'abc', 'qa_sha': 'abc', 'review_sha': 'abc',
+               'qa': {'passed': True}, 'review': {'passed': True}}
+        config_path = self.root / 'custom config.yaml'
+        config = {'export_artifact': 'build/game.exe'}
+        summary = run_summary(run, config, config_path)
+        self.assertIn('Launch in PowerShell:', summary)
+        self.assertIn("$playtestNotes = Read-Host", summary)
+        self.assertIn('resume \'run-123\' --visual-observation "$playtestNotes"', summary)
+        self.assertIn("--config '" + str(config_path.resolve()) + "'", summary)
+        run['review_sha'] = 'old'
+        self.assertNotIn('Read-Host', run_summary(run, config, config_path))
+        run['review'] = None
+        self.assertNotIn('Read-Host', run_summary(run, config, config_path))
+
     def test_sol_fallback_only_after_local_failure(self):
         self.cfg['agents'] = {'provider': 'ollama', 'fallback': 'codex',
                               'model': 'gpt-6.1-sol', 'reasoning_effort': 'medium'}

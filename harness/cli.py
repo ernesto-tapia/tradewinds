@@ -38,7 +38,7 @@ def resolve_codex(configured):
     return configured
 
 
-def run_summary(run, config=None):
+def run_summary(run, config=None, config_path=None):
     """Describe saved state without treating historical reports as current approval."""
     stage = run['stage']
     lines = [f"Summary: {run['key']} — {stage.replace('_', ' ')}."]
@@ -61,6 +61,20 @@ def run_summary(run, config=None):
             lines.append('Build: ' + build.name)
             lines.append('Build path: ' + str(build))
             lines.append("Launch in PowerShell: & '" + str(build).replace("'", "''") + "'")
+            approved = all((run.get(role) or {}).get('passed') and run.get(role + '_sha') == run.get('sha')
+                           for role in ('qa', 'review')) and bool(run.get('sha'))
+            if approved and stage in ('waiting_merge', 'acceptance_gap'):
+                cli = ".\\.venv\\Scripts\\tradewinds.exe"
+                config_argument = ''
+                if config_path is not None:
+                    path = Path(config_path).resolve()
+                    cli = str(path.parent / '.venv/Scripts/tradewinds.exe')
+                    config_argument = " --config '" + str(path).replace("'", "''") + "'"
+                lines.append('After playing, record your visual test observations in PowerShell:')
+                lines.append("$playtestNotes = Read-Host 'Describe what you observed in the demo'")
+                lines.append("& '" + cli.replace("'", "''") + "'" + config_argument +
+                             " resume '" + run['id'].replace("'", "''") +
+                             "' --visual-observation \"$playtestNotes\"")
         else:
             lines.append('Build: not available locally. Expected path: ' + str(build))
     if stage == 'waiting_merge':
@@ -222,7 +236,7 @@ def main():
                 workflow.watch(args.once)
                 return 0
             print(json.dumps(run, indent=2))
-            print('\n' + run_summary(run, cfg))
+            print('\n' + run_summary(run, cfg, config_path))
             return 1 if run['stage'] in ('exhausted', 'acceptance_gap') else 0
     except (Exception, KeyboardInterrupt) as error:
         print(f'{type(error).__name__}: {error}', file=sys.stderr)
